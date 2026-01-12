@@ -1,0 +1,1500 @@
+#!/bin/bash
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+LOG_FILE="/tmp/rengeos-install.log"
+DISK=""
+BOOT_PART=""
+ROOT_PART=""
+RECOVERY_PART=""
+HOSTNAME=""
+USERNAME=""
+TIMEZONE=""
+LOCALE=""
+KERNEL_NAME=""
+BOOT_SIZE="1G"
+RECOVERY_SIZE="7G"
+BOOT_MODE=""
+BOOT_FS=""
+ENABLE_RECOVERY="no"
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"
+    if command -v dialog &> /dev/null; then
+        dialog --title "Error" --msgbox "$*\n\nCheck log: $LOG_FILE" 12 70
+    fi
+    cleanup_on_error
+    exit 1
+}
+
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+info() {
+    echo -e "${BLUE}[INFO]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+cleanup_on_error() {
+    warning "Attempting cleanup after error..."
+    umount -R /mnt/recovery 2>/dev/null || true
+    umount -R /mnt 2>/dev/null || true
+    unset root_pass root_pass_confirm user_pass user_pass_confirm 2>/dev/null || true
+}
+
+check_dependencies() {
+    local deps=("dialog" "gdisk" "fdisk" "sfdisk" "unsquashfs" "arch-chroot" "genfstab" "grub-install" "bcachefs" "mkfs.xfs" "mkfs.vfat")
+    local missing=()
+    
+    for cmd in "${deps[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        error "Missing required commands: ${missing[*]}\nPlease install them first."
+    fi
+}
+
+detect_boot_mode() {
+    if [ -d /sys/firmware/efi/efivars ]; then
+        BOOT_MODE="UEFI"
+        BOOT_FS="vfat"
+        info "Boot mode detected: UEFI (will use FAT32 for /boot)"
+    else
+        BOOT_MODE="LEGACY"
+        BOOT_FS="xfs"
+        info "Boot mode detected: Legacy BIOS (will use XFS for /boot)"
+    fi
+}
+
+detect_kernel() {
+    local kernel_path="/run/archiso/bootmnt/arch/boot/x86_64"
+    local found_kernels=()
+    
+    if [ -d "$kernel_path" ]; then
+        while IFS= read -r kernel_file; do
+            local kname=$(basename "$kernel_file" | sed 's/^vmlinuz-//')
+            found_kernels+=("$kname")
+        done < <(find "$kernel_path" -name "vmlinuz-*" 2>/dev/null)
+    fi
+    
+    if [ ${#found_kernels[@]} -eq 0 ]; then
+        error "No kernel found in installation media at $kernel_path"
+    fi
+    
+    KERNEL_NAME="${found_kernels[0]}"
+    info "Auto-detected kernel: $KERNEL_NAME"
+    
+    dialog --title "Kernel Detection" --msgbox "\
+Kernel auto-detected from installation media:\n\n\
+  Kernel: $KERNEL_NAME\n\
+  Location: $kernel_path/vmlinuz-$KERNEL_NAME\n\n\
+This kernel will be used for installation." 12 70
+}
+
+select_timezone() {
+    local zoneinfo_path="/usr/share/zoneinfo"
+    
+    if [ ! -d "$zoneinfo_path" ]; then
+        warning "Timezone directory not found, using default"
+        TIMEZONE="UTC"
+        return
+    fi
+    
+    local regions=()
+    local region_list=$(find "$zoneinfo_path" -maxdepth 1 -type d -printf "%f\n" | grep -v "^posix$\|^right$\|^Etc$\|^SystemV$\|^zoneinfo$" | sort)
+    local root_zones=$(find "$zoneinfo_path" -maxdepth 1 -type f -printf "%f\n" | sort)
+    
+    while IFS= read -r region; do
+        if [ -n "$region" ]; then
+            regions+=("$region" "")
+        fi
+    done <<< "$region_list"
+    
+    while IFS= read -r zone; do
+        if [ -n "$zone" ]; then
+            regions+=("$zone" "Direct timezone")
+        fi
+    done <<< "$root_zones"
+    
+    if [ ${#regions[@]} -eq 0 ]; then
+        warning "No timezones found, using default UTC"
+        TIMEZONE="UTC"
+        return
+    fi
+    
+    local selected_region=""
+    selected_region=$(dialog --title "Timezone Selection - Step 1/2" --menu "\
+Select your continent/region:\n\n\
+Use arrow keys to navigate, Enter to select." 20 60 12 "${regions[@]}" 3>&1 1>&2 2>&3)
+    
+    if [ $? -ne 0 ]; then
+        TIMEZONE="UTC"
+        return
+    fi
+    
+    if [ -d "$zoneinfo_path/$selected_region" ]; then
+        local cities=()
+        local city_list=$(find "$zoneinfo_path/$selected_region" -type f -printf "%f\n" | sort)
+        
+        while IFS= read -r city; do
+            if [ -n "$city" ]; then
+                cities+=("$city" "")
+            fi
+        done <<< "$city_list"
+        
+        if [ ${#cities[@]} -eq 0 ]; then
+            warning "No cities found in $selected_region, using region as timezone"
+            TIMEZONE="$selected_region"
+            return
+        fi
+        
+        local selected_city=""
+        selected_city=$(dialog --title "Timezone Selection - Step 2/2" --menu "\
+Selected region: $selected_region\n\n\
+Select your city/timezone:\n\n\
+Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            TIMEZONE="$selected_region/$(echo "$city_list" | head -n1)"
+        else
+            TIMEZONE="$selected_region/$selected_city"
+        fi
+    else
+        TIMEZONE="$selected_region"
+    fi
+    
+    if [ ! -f "$zoneinfo_path/$TIMEZONE" ]; then
+        warning "Selected timezone $TIMEZONE not found, using UTC"
+        TIMEZONE="UTC"
+    else
+        info "Selected timezone: $TIMEZONE"
+    fi
+}
+
+show_welcome() {
+    dialog --title "RengeOS Installer" --msgbox "\
+Welcome to RengeOS Installation Script!\n\n\
+This interactive installer will guide you through:\n\
+  - Disk partitioning\n\
+  - System installation with optimized boot partition\n\
+  - Optional Recovery Mode partition\n\
+  - User configuration\n\
+  - Bootloader setup\n\n\
+    Filesystem Layout:\n\
+  UEFI Mode:\n\
+    - /boot: FAT32 (1GB, EFI System Partition)\n\
+    - /recovery: XFS (optional, min 3GB, GRUB-compatible)\n\
+    - /: Bcachefs with LZ4 compression\n\
+  Legacy Mode:\n\
+    - /boot: XFS (1GB, fast and reliable)\n\
+    - /recovery: XFS (optional, min 3GB, GRUB-compatible)\n\
+    - /: Bcachefs with LZ4 compression\n\n\
+Performance OPTIMIZATIONS:\n\
+  - LZ4 compression (fast, ~60% compression ratio)\n\
+  - NoAtime mount (reduced disk I/O)\n\
+  - TRIM/Discard for SSD performance\n\
+  - CPU mitigations OFF (more FPS, less security)\n\
+  - Transparent hugepages optimized\n\
+  - Split lock detection disabled\n\n\
+NEW: Recovery Mode for system rescue!\n\n\
+WARNING: All data on selected disk will be ERASED!\n\n\
+Press OK to continue or Cancel to exit." 38 75
+}
+
+select_disk() {
+    local disks=()
+    local count=0
+    
+    while IFS= read -r line; do
+        local name=$(echo "$line" | awk '{print $1}')
+        local size=$(echo "$line" | awk '{print $4}')
+        local model=$(echo "$line" | awk '{$1=$2=$3=$4=""; print $0}' | xargs)
+        
+        disks+=("$name" "$size - $model")
+        count=$((count + 1))
+    done < <(lsblk -ndo NAME,TYPE,SIZE,MODEL | grep disk)
+    
+    if [ ${#disks[@]} -eq 0 ]; then
+        error "No disks found on system"
+    fi
+    
+    info "Found $count disk(s) available for installation"
+    
+    DISK=$(dialog --title "Select Installation Disk" --menu "\
+Select the disk for installation:\n\n\
+Found $count disk(s) on this system.\n\
+Use arrow keys to select, Enter to confirm.\n\n\
+WARNING: ALL DATA WILL BE ERASED!" 20 70 10 "${disks[@]}" 3>&1 1>&2 2>&3) || exit 0
+    
+    DISK="/dev/$DISK"
+    log "User selected disk: $DISK"
+    
+    if [[ "$DISK" == *"nvme"* ]] || [[ "$DISK" == *"mmcblk"* ]]; then
+        BOOT_PART="${DISK}p1"
+        RECOVERY_PART="${DISK}p2"
+        ROOT_PART="${DISK}p3"
+    else
+        BOOT_PART="${DISK}1"
+        RECOVERY_PART="${DISK}2"
+        ROOT_PART="${DISK}3"
+    fi
+    
+    local disk_info=$(lsblk "$DISK" -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "Disk information unavailable")
+    
+    dialog --title "Disk Information" --yesno "\
+Selected disk: $DISK\n\
+Boot mode: $BOOT_MODE\n\n\
+Current layout:\n\
+$disk_info\n\n\
+WARNING: Continue with installation?" 18 70 || exit 0
+}
+
+configure_recovery_mode() {
+    log "Prompting user for Recovery Mode configuration..."
+    
+    if dialog --title "Recovery Mode Configuration" --yesno "\
+Do you want to create a Recovery Mode partition?\n\n\
+What is Recovery Mode?\n\
+  - A separate bootable system for emergency rescue\n\
+  - Access via GRUB menu entry 'Recovery Mode'\n\
+  - Boots to recovery mode(Root emulation)\n\
+  - Useful for system repair and data recovery\n\
+  - Stored on separate XFS partition (GRUB-compatible)\n\
+  - Includes /rengeos-reborn\n\n\
+Requirements:\n\
+  - Minimum size: 5GB (REQUIRED)\n\
+  - Recommended: 7GB or more\n\
+  - Uses disk space from your drive\n\n\
+Enable Recovery Mode now?" 21 70; then
+        ENABLE_RECOVERY="yes"
+        log "User chose to enable Recovery Mode"
+        
+        while true; do
+            RECOVERY_SIZE=$(dialog --title "Recovery Partition Size" --inputbox "\
+Enter recovery partition size:\n\n\
+This will create a separate bootable system for rescue\n\
+and store system backup files.\n\n\
+Minimum: 5G (REQUIRED - below 5GB not allowed)\n\
+Recommended: 7G\n\
+Format: 5G, 7G, 6144M, etc.\n\n\
+Note: This space will be taken from your disk." 17 70 "7G" 3>&1 1>&2 2>&3)
+            
+            if [ $? -ne 0 ]; then
+                RECOVERY_SIZE="7G"
+                break
+            fi
+            
+            if ! [[ "$RECOVERY_SIZE" =~ ^[0-9]+[MG]$ ]]; then
+                dialog --title "Invalid Format" --msgbox "\
+Invalid size format!\n\n\
+Please use format like: 5G, 7G, 6144M\n\n\
+Press OK to try again." 10 50
+                continue
+            fi
+            
+            local size_value="${RECOVERY_SIZE//[^0-9]/}"
+            local size_unit="${RECOVERY_SIZE//[0-9]/}"
+            local size_in_mb=0
+            
+            if [ "$size_unit" = "M" ]; then
+                size_in_mb=$size_value
+            elif [ "$size_unit" = "G" ]; then
+                size_in_mb=$((size_value * 1024))
+            fi
+            
+            if [ $size_in_mb -lt 5120 ]; then
+                dialog --title "Size Too Small" --msgbox "\
+Recovery partition size is too small!\n\n\
+You entered: $RECOVERY_SIZE\n\
+Minimum required: 5G (5120MB)\n\n\
+Recovery partition needs space for:\n\
+  - Extracted system files (~2-3GB)\n\
+  - System backup (airootfs.sfs ~1-2GB)\n\
+  - Kernel and initramfs\n\
+  - Working space\n\n\
+Please enter at least 5G or more.\n\
+Recommended: 7G\n\n\
+Press OK to try again." 20 60
+                continue
+            fi
+            
+            log "Recovery partition size accepted: $RECOVERY_SIZE ($size_in_mb MB)"
+            break
+        done
+        
+        log "Recovery partition size configured: $RECOVERY_SIZE"
+    else
+        ENABLE_RECOVERY="no"
+        log "User chose to skip Recovery Mode configuration"
+    fi
+}
+
+configure_boot_size() {
+    local boot_description=""
+    if [ "$BOOT_MODE" = "UEFI" ]; then
+        boot_description="UEFI EFI System Partition (FAT32)\n\nRequired by UEFI firmware to boot the system."
+    else
+        boot_description="Legacy BIOS Boot Partition (XFS)\n\nNote: GRUB cannot boot from Bcachefs directly,\nso /boot must be on a separate XFS partition."
+    fi
+    
+    BOOT_SIZE=$(dialog --title "Boot Partition Size" --inputbox "\
+Enter boot partition size:\n\n\
+Boot Mode: $BOOT_MODE\n\
+Filesystem: $BOOT_FS\n\
+$boot_description\n\n\
+Recommended: 1G\n\
+Minimum: 512M\n\
+Maximum: 2G\n\n\
+Format: 512M, 1G, 2G, etc." 20 70 "1G" 3>&1 1>&2 2>&3) || BOOT_SIZE="1G"
+    
+    if ! [[ "$BOOT_SIZE" =~ ^[0-9]+[MG]$ ]]; then
+        warning "Invalid size format, using default 1G"
+        BOOT_SIZE="1G"
+    fi
+    
+    log "Boot partition size configured: $BOOT_SIZE ($BOOT_FS) for $BOOT_MODE mode"
+}
+
+configure_system_settings() {
+    HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
+Enter hostname:\n\n\
+The hostname identifies your computer on a network.\n\
+Use lowercase letters, numbers, and hyphens only." 12 60 "rengeos" 3>&1 1>&2 2>&3) || HOSTNAME="rengeos"
+    
+    if ! [[ "$HOSTNAME" =~ ^[a-z0-9-]+$ ]]; then
+        warning "Invalid hostname, using default 'rengeos'"
+        HOSTNAME="rengeos"
+    fi
+    
+    USERNAME=$(dialog --title "User Configuration" --inputbox "\
+Enter username:\n\n\
+This will be your primary user account.\n\
+Use lowercase letters and numbers only." 12 60 "rengeos" 3>&1 1>&2 2>&3) || USERNAME="rengeos"
+    
+    if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        warning "Invalid username, using default 'rengeos'"
+        USERNAME="rengeos"
+    fi
+    
+    select_timezone
+    
+    local locales=(
+        "en_US.UTF-8" "English (US)"
+        "en_GB.UTF-8" "English (UK)"
+        "vi_VN.UTF-8" "Vietnamese"
+        "ja_JP.UTF-8" "Japanese"
+        "zh_CN.UTF-8" "Chinese (Simplified)"
+    )
+    
+    LOCALE=$(dialog --title "Locale Selection" --menu "\
+Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3) || LOCALE="en_US.UTF-8"
+    
+    log "Auto-detecting kernel from installation media..."
+    detect_kernel
+}
+
+show_configuration_summary() {
+    local boot_fs_display=""
+    if [ "$BOOT_MODE" = "UEFI" ]; then
+        boot_fs_display="FAT32 (EFI)"
+    else
+        boot_fs_display="XFS (GRUB)"
+    fi
+    
+    local partition_layout="  Boot: $BOOT_PART ($boot_fs_display, $BOOT_SIZE)"
+    
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        partition_layout="${partition_layout}\n  Recovery: $RECOVERY_PART (XFS, $RECOVERY_SIZE)\n  Root: $ROOT_PART (Bcachefs, remaining)"
+    else
+        partition_layout="${partition_layout}\n  Root: $ROOT_PART (Bcachefs, remaining)"
+    fi
+    
+    local recovery_status="Disabled"
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        recovery_status="Enabled ($RECOVERY_SIZE)"
+    fi
+    
+    dialog --title "Configuration Summary" --yesno "\
+Please review your configuration:\n\n\
+DISK CONFIGURATION:\n\
+  Disk: $DISK\n\
+  Boot Mode: $BOOT_MODE\n\
+  Filesystems:\n\
+    - Boot: $boot_fs_display (optimized for $BOOT_MODE)\n\
+    - Root: Bcachefs (single volume, no subvolumes)\n\
+    - Recovery: $recovery_status (XFS, GRUB-compatible)\n\
+$partition_layout\n\n\
+SYSTEM CONFIGURATION:\n\
+  Hostname: $HOSTNAME\n\
+  Username: $USERNAME\n\
+  Timezone: $TIMEZONE\n\
+  Locale:   $LOCALE\n\
+  Kernel:   $KERNEL_NAME (auto-detected)\n\n\
+WARNING: ALL DATA on $DISK will be ERASED!\n\n\
+Continue with installation?" 28 70
+}
+
+partition_disk() {
+    (
+    echo "10" ; sleep 1
+    echo "XXX"
+    echo "Cleaning existing partition table..."
+    echo "XXX"
+
+    log "Cleaning partition table on $DISK..."
+
+    if gdisk "$DISK" <<EOF > /dev/null 2>&1 || true
+x
+z
+y
+y
+EOF
+    then
+        log "Cleaned GPT partition table"
+    else
+        log "GPT clean failed, trying MBR clean..."
+        dd if=/dev/zero of="$DISK" bs=512 count=1 > /dev/null 2>&1 || true
+    fi
+
+    echo "20" ; sleep 1
+    echo "XXX"
+    echo "Creating new partition table..."
+    echo "XXX"
+
+    log "Creating partitions with sfdisk for $BOOT_MODE mode..."
+
+    if [ "$BOOT_MODE" = "UEFI" ]; then
+        log "Creating GPT partition table for UEFI with EFI System Partition..."
+        if [ "$ENABLE_RECOVERY" = "yes" ]; then
+            sfdisk "$DISK" <<EOF > /dev/null 2>&1 || error "Failed to create UEFI partitions"
+label: gpt
+size=$BOOT_SIZE, type=uefi
+size=$RECOVERY_SIZE, type=linux
+type=linux
+EOF
+            log "UEFI partitions created: ${BOOT_SIZE} EFI + ${RECOVERY_SIZE} recovery + remaining root"
+        else
+            sfdisk "$DISK" <<EOF > /dev/null 2>&1 || error "Failed to create UEFI partitions"
+label: gpt
+size=$BOOT_SIZE, type=uefi
+type=linux
+EOF
+            log "UEFI partitions created: ${BOOT_SIZE} EFI + remaining root"
+        fi
+    else
+        log "Creating MBR partition table for Legacy BIOS..."
+        if [ "$ENABLE_RECOVERY" = "yes" ]; then
+            sfdisk "$DISK" <<EOF > /dev/null 2>&1 || error "Failed to create Legacy partitions"
+label: dos
+size=$BOOT_SIZE, type=83, bootable
+size=$RECOVERY_SIZE, type=83
+type=83
+EOF
+            log "Legacy BIOS partitions created: ${BOOT_SIZE} boot + ${RECOVERY_SIZE} recovery + remaining root"
+        else
+            sfdisk "$DISK" <<EOF > /dev/null 2>&1 || error "Failed to create Legacy partitions"
+label: dos
+size=$BOOT_SIZE, type=83, bootable
+type=83
+EOF
+            log "Legacy BIOS partitions created: ${BOOT_SIZE} boot + remaining root"
+        fi
+    fi
+
+    echo "40" ; sleep 2
+
+    log "Running partprobe to update kernel partition table..."
+    partprobe "$DISK" 2>/dev/null || true
+    
+    log "Waiting for udev to settle..."
+    if command -v udevadm &> /dev/null; then
+        udevadm settle --timeout=10
+    fi
+    
+    sleep 5
+
+    log "Verifying partitions were created..."
+    
+    if [ ! -b "$BOOT_PART" ]; then
+        error "Boot partition $BOOT_PART was not created!"
+    fi
+    if [ ! -b "$ROOT_PART" ]; then
+        error "Root partition $ROOT_PART was not created!"
+    fi
+    if [ "$ENABLE_RECOVERY" = "yes" ] && [ ! -b "$RECOVERY_PART" ]; then
+        error "Recovery partition $RECOVERY_PART was not created!"
+    fi
+    log "Partitions verified successfully"
+
+    echo "50"
+    echo "XXX"
+    echo "Formatting boot partition with $BOOT_FS..."
+    echo "XXX"
+
+    log "Formatting $BOOT_PART as $BOOT_FS..."
+    
+    wipefs -af "$BOOT_PART" > /dev/null 2>&1 || true
+    sleep 2
+    
+    if [ "$BOOT_MODE" = "UEFI" ]; then
+        if ! mkfs.vfat -F 32 -n "RengeOS_EFI" "$BOOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+            error "Failed to format boot partition with FAT32"
+        fi
+        log "FAT32 EFI System Partition formatted successfully"
+    else
+        if ! mkfs.xfs -f \
+            -i size=512 \
+            -n size=4096 \
+            -d agcount=4 \
+            -l size=64m \
+            -m crc=1 \
+            -L RengeOS_Boot \
+            "$BOOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+            error "Failed to format boot partition with XFS"
+        fi
+        log "XFS boot partition formatted successfully"
+    fi
+    
+    sleep 1
+
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        echo "60" ; sleep 1
+        echo "XXX"
+        echo "Formatting recovery partition with XFS..."
+        echo "XXX"
+
+        log "Preparing recovery partition $RECOVERY_PART for XFS formatting..."
+
+        wipefs -af "$RECOVERY_PART" > /dev/null 2>&1 || true
+        
+        log "Waiting for device to be ready..."
+        sleep 3
+        
+        if command -v udevadm &> /dev/null; then
+            udevadm settle --timeout=10
+        fi
+
+        log "Formatting recovery partition with XFS (GRUB-compatible)..."
+        
+        if ! mkfs.xfs -f \
+            -i size=512 \
+            -n size=4096 \
+            -d agcount=4 \
+            -l size=64m \
+            -m crc=1,finobt=1,rmapbt=0,reflink=0 \
+            -L ROS_Recovery \
+            "$RECOVERY_PART" 2>&1 | tee -a "$LOG_FILE"; then
+            error "Failed to format recovery partition with XFS"
+        fi
+        
+        log "XFS recovery partition formatted successfully (optimized for GRUB compatibility)"
+        
+        sleep 2
+        
+        log "Verifying XFS filesystem on recovery partition..."
+        if ! xfs_info "$RECOVERY_PART" > /dev/null 2>&1; then
+            warning "XFS info check failed, trying alternative verification..."
+            if ! blkid "$RECOVERY_PART" | grep -q "TYPE=\"xfs\""; then
+                error "XFS recovery filesystem verification failed"
+            fi
+        fi
+        log "XFS recovery filesystem verified successfully"
+    fi
+
+    echo "70" ; sleep 1
+    echo "XXX"
+    echo "Formatting root partition with Bcachefs..."
+    echo "XXX"
+
+    log "Formatting $ROOT_PART with Bcachefs..."
+
+    wipefs -af "$ROOT_PART" > /dev/null 2>&1 || true
+    sleep 3
+
+    if ! bcachefs format \
+        --force \
+        --compression=lz4 \
+        --background_compression=lz4 \
+        --metadata_replicas=1 \
+        --data_replicas=1 \
+        --acl \
+        --label=RengeOS_Root \
+        "$ROOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+        error "Failed to format root partition with Bcachefs"
+    fi
+    
+    log "Bcachefs root partition formatted successfully"
+
+    echo "100"
+    echo "XXX"
+    echo "Partitioning completed"
+    echo "XXX"
+    sleep 1
+
+    ) | dialog --title "Step 1/5: Partitioning" --gauge "Starting disk partitioning..." 10 70 0
+
+    success "Disk partitioning completed"
+}
+
+mount_and_extract() {
+    (
+    echo "5"
+    echo "XXX"
+    echo "Mounting root partition..."
+    echo "XXX"
+
+    log "Mounting $ROOT_PART to /mnt..."
+    
+    mkdir -p /mnt
+    
+    if ! mount -t bcachefs -o noatime,discard "$ROOT_PART" /mnt; then
+        error "Failed to mount root partition"
+    fi
+    
+    log "Root partition mounted successfully"
+
+    echo "10" ; sleep 1
+    echo "XXX"
+    echo "Extracting system files to root..."
+    echo "XXX"
+
+    log "Extracting system with unsquashfs to /mnt..."
+
+    if [ -f /run/archiso/bootmnt/arch/x86_64/airootfs.sfs ]; then
+        unsquashfs -f -d /mnt /run/archiso/bootmnt/arch/x86_64/airootfs.sfs \
+            > /tmp/unsquashfs.log 2>&1 || error "Failed to extract system to root"
+        
+        log "System extracted successfully to /mnt"
+    else
+        error "System image not found"
+    fi
+
+    echo "30" ; sleep 1
+    echo "XXX"
+    echo "Preparing boot partition..."
+    echo "XXX"
+
+    log "Handling /boot directory..."
+    
+    if [ -d /mnt/boot ] && [ "$(ls -A /mnt/boot 2>/dev/null)" ]; then
+        mkdir -p /mnt/boot_temp
+        mv /mnt/boot/* /mnt/boot_temp/ 2>/dev/null || true
+    else
+        mkdir -p /mnt/boot
+        mkdir -p /mnt/boot_temp
+    fi
+
+    log "Mounting $BOOT_PART to /mnt/boot..."
+    
+    if [ "$BOOT_MODE" = "UEFI" ]; then
+        if ! mount -t vfat -o defaults,utf8,dmask=0022,fmask=0133 "$BOOT_PART" /mnt/boot; then
+            error "Failed to mount FAT32 boot partition"
+        fi
+    else
+        if ! mount -t xfs -o noatime,nodiratime,logbufs=8,logbsize=256k "$BOOT_PART" /mnt/boot; then
+            error "Failed to mount XFS boot partition"
+        fi
+    fi
+
+    log "Copying kernel to /mnt/boot..."
+    if [ -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" ]; then
+        cp -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" /mnt/boot/ \
+            || error "Failed to copy kernel"
+    else
+        error "Kernel not found"
+    fi
+
+    if [ -d /mnt/boot_temp ] && [ "$(ls -A /mnt/boot_temp 2>/dev/null)" ]; then
+        cp -a /mnt/boot_temp/* /mnt/boot/ 2>/dev/null || true
+    fi
+    rm -rf /mnt/boot_temp
+
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        echo "50" ; sleep 1
+        echo "XXX"
+        echo "Setting up Recovery Mode partition..."
+        echo "XXX"
+
+        log "Mounting $RECOVERY_PART to /mnt/recovery..."
+        mkdir -p /mnt/recovery
+        
+        if ! mount -t xfs -o noatime,nodiratime,logbufs=8,logbsize=256k "$RECOVERY_PART" /mnt/recovery; then
+            error "Failed to mount XFS recovery partition"
+        fi
+        
+        log "XFS recovery partition mounted successfully"
+
+        echo "55" ; sleep 1
+        echo "XXX"
+        echo "Extracting system files to recovery..."
+        echo "XXX"
+
+        log "Extracting system to recovery partition..."
+        if [ -f /run/archiso/bootmnt/arch/x86_64/airootfs.sfs ]; then
+            unsquashfs -f -d /mnt/recovery /run/archiso/bootmnt/arch/x86_64/airootfs.sfs \
+                > /tmp/unsquashfs-recovery.log 2>&1 || error "Failed to extract system to recovery"
+            
+            log "System extracted successfully to /mnt/recovery"
+        else
+            error "System image not found for recovery"
+        fi
+
+        echo "70" ; sleep 1
+        echo "XXX"
+        echo "Installing kernel to recovery /boot..."
+        echo "XXX"
+
+        log "Creating /boot directory in recovery if needed..."
+        mkdir -p /mnt/recovery/boot
+
+        log "Copying kernel to /mnt/recovery/boot..."
+        if [ -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" ]; then
+            cp -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" /mnt/recovery/boot/ \
+                || error "Failed to copy kernel to recovery"
+            log "Kernel copied successfully to recovery partition"
+        else
+            error "Kernel not found for recovery"
+        fi
+
+        if [ ! -f "/mnt/recovery/boot/vmlinuz-${KERNEL_NAME}" ]; then
+            error "Kernel verification failed in recovery /boot"
+        fi
+
+        echo "75" ; sleep 1
+        echo "XXX"
+        echo "Creating rengeos-reborn directory structure..."
+        echo "XXX"
+
+        log "Creating rengeos-reborn directory structure in recovery partition..."
+        mkdir -p /mnt/recovery/rengeos-reborn/airootfs
+        mkdir -p /mnt/recovery/rengeos-reborn/kernel
+
+        log "Copying airootfs.sfs to recovery partition..."
+        if [ -f /run/archiso/bootmnt/arch/x86_64/airootfs.sfs ]; then
+            cp -f /run/archiso/bootmnt/arch/x86_64/airootfs.sfs /mnt/recovery/rengeos-reborn/airootfs/ \
+                || error "Failed to copy airootfs.sfs to recovery"
+            log "airootfs.sfs copied successfully to /rengeos-reborn/airootfs/"
+        else
+            error "airootfs.sfs not found"
+        fi
+
+        log "Copying kernel to rengeos-reborn/kernel..."
+        if [ -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" ]; then
+            cp -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" /mnt/recovery/rengeos-reborn/kernel/ \
+                || error "Failed to copy kernel to rengeos-reborn"
+            log "Kernel copied successfully to /rengeos-reborn/kernel/"
+        else
+            error "Kernel not found for rengeos-reborn"
+        fi
+
+        log "Verifying rengeos-reborn structure..."
+        if [ ! -f "/mnt/recovery/rengeos-reborn/airootfs/airootfs.sfs" ]; then
+            error "airootfs.sfs not found in rengeos-reborn"
+        fi
+        if [ ! -f "/mnt/recovery/rengeos-reborn/kernel/vmlinuz-${KERNEL_NAME}" ]; then
+            error "Kernel not found in rengeos-reborn"
+        fi
+
+        log "rengeos-reborn directory structure created successfully:"
+        log "  - /rengeos-reborn/airootfs/airootfs.sfs"
+        log "  - /rengeos-reborn/kernel/vmlinuz-${KERNEL_NAME}"
+
+        log "Recovery partition files prepared (chroot configuration will be done after password input)"
+    fi
+
+    echo "80" ; sleep 1
+    echo "XXX"
+    echo "Generating fstab..."
+    echo "XXX"
+
+    log "Generating fstab with genfstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab || error "Failed to generate fstab"
+
+    log "Optimizing fstab entries..."
+    
+    local root_uuid boot_uuid recovery_uuid
+    root_uuid=$(blkid -s UUID -o value "$ROOT_PART")
+    boot_uuid=$(blkid -s UUID -o value "$BOOT_PART")
+    
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
+    fi
+
+    cp /mnt/etc/fstab /mnt/etc/fstab.bak
+
+    cat > /mnt/etc/fstab <<FSTAB_EOF
+# /etc/fstab: static file system information
+# <file system> <mount point> <type> <options> <dump> <pass>
+
+# Root filesystem - Bcachefs with compression
+UUID=$root_uuid / bcachefs noatime,discard 0 0
+
+FSTAB_EOF
+
+    if [ "$BOOT_MODE" = "UEFI" ]; then
+        cat >> /mnt/etc/fstab <<FSTAB_EOF
+# Boot partition - FAT32 EFI System Partition
+UUID=$boot_uuid /boot vfat defaults,utf8,dmask=0022,fmask=0133 0 2
+
+FSTAB_EOF
+    else
+        cat >> /mnt/etc/fstab <<FSTAB_EOF
+# Boot partition - XFS optimized
+UUID=$boot_uuid /boot xfs noatime,nodiratime,logbufs=8,logbsize=256k 0 2
+
+FSTAB_EOF
+    fi
+
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
+        
+        cat >> /mnt/etc/fstab <<FSTAB_EOF
+# Recovery partition - XFS (not auto-mounted, for emergency use only)
+# UUID=$recovery_uuid /recovery xfs noatime,nodiratime,noauto 0 0
+
+FSTAB_EOF
+        log "Recovery partition added to fstab with noauto flag (manual mount only)"
+    fi
+
+    log "Fstab configuration complete"
+
+    echo "90" ; sleep 1
+    echo "XXX"
+    echo "Cleaning up unnecessary files..."
+    echo "XXX"
+
+    rm -rf /mnt/etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+    rm -rf /mnt/etc/motd 2>/dev/null || true
+    rm -rf /mnt/etc/mkinitcpio.conf 2>/dev/null || true
+
+    echo "100"
+    echo "XXX"
+    echo "System extraction completed"
+    echo "XXX"
+    sleep 1
+
+    ) | dialog --title "Step 2/5: System Installation" --gauge "Preparing system..." 10 70 0
+
+    success "System installation completed"
+}
+
+configure_system() {
+    local root_pass=""
+    local root_pass_confirm=""
+    local user_pass=""
+    local user_pass_confirm=""
+    local enable_zram="no"
+    local recovery_uuid=""
+    
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
+        log "Recovery partition UUID: $recovery_uuid"
+    fi
+    
+    while true; do
+        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for both main system and recovery partition)" 12 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            warning "User cancelled root password input"
+            exit 0
+        fi
+        
+        if [ -z "$root_pass" ]; then
+            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+            continue
+        fi
+        
+        root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            warning "User cancelled root password confirmation"
+            exit 0
+        fi
+        
+        if [ "$root_pass" = "$root_pass_confirm" ]; then
+            break
+        else
+            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+        fi
+    done
+    
+    while true; do
+        user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '$USERNAME':" 10 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            warning "User cancelled user password input"
+            exit 0
+        fi
+        
+        if [ -z "$user_pass" ]; then
+            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+            continue
+        fi
+        
+        user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            warning "User cancelled user password confirmation"
+            exit 0
+        fi
+        
+        if [ "$user_pass" = "$user_pass_confirm" ]; then
+            break
+        else
+            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+        fi
+    done
+    
+    log "Prompting user for Zram configuration..."
+    if dialog --title "Zram Configuration" --yesno "\
+Do you want to enable Zram for swap compression?\n\n\
+What is Zram?\n\
+  - Compressed swap in RAM (faster than disk)\n\
+  - Uses RAM / 2 for swap space\n\
+  - LZ4 compression algorithm (fast)\n\
+  - Reduces disk wear on SSD/HDD\n\n\
+Recommended: YES for systems with 4GB+ RAM\n\n\
+Enable Zram now?" 16 60; then
+        enable_zram="yes"
+        log "User chose to enable Zram"
+    else
+        enable_zram="no"
+        log "User chose to skip Zram configuration"
+    fi
+    
+    (
+    echo "10"
+    echo "XXX"
+    echo "Creating configuration script..."
+    echo "XXX"
+    
+    log "Creating chroot configuration script..."
+    
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        echo "15" ; sleep 1
+        echo "XXX"
+        echo "Configuring recovery system (chroot)..."
+        echo "XXX"
+
+        log "Creating recovery system configuration script..."
+        
+        cat > /mnt/recovery/setup-recovery.sh <<'RECOVERY_CHROOT_EOF'
+#!/bin/bash
+set -e
+
+log() {
+    echo "[RECOVERY] [$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+KERNEL_NAME="${RECOVERY_KERNEL}"
+RECOVERY_PART="${RECOVERY_PARTITION}"
+ROOT_PASS="${RECOVERY_ROOT_PASS}"
+
+log "Configuring recovery system for emergency boot..."
+
+log "Setting root password for recovery partition..."
+echo "root:$ROOT_PASS" | chpasswd
+
+log "Configuring MOTD for recovery mode..."
+echo "------[RECOVERY MODE!]------" > /etc/motd
+
+log "Cleaning up unnecessary files in recovery..."
+rm -rf /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+
+log "Setting up mkinitcpio for recovery..."
+if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
+    mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
+    rm -rf /etc/mkinitcpio.conf.d/
+fi
+
+log "Configuring mkinitcpio hooks for recovery mode..."
+sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
+sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress xfs)/' /etc/mkinitcpio.conf
+
+log "Recovery mkinitcpio configuration:"
+grep "^MODULES=" /etc/mkinitcpio.conf
+grep "^HOOKS=" /etc/mkinitcpio.conf
+
+log "Creating kernel preset for recovery $KERNEL_NAME..."
+KVER=$(ls /usr/lib/modules | grep "$KERNEL_NAME" | head -n1)
+
+if [ -z "$KVER" ]; then
+    echo "ERROR: Kernel $KERNEL_NAME not found in recovery"
+    ls /usr/lib/modules
+    exit 1
+fi
+
+cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="\$(ls /usr/lib/modules | grep $KERNEL_NAME)"
+PRESETS=('default')
+default_image="/boot/initramfs-$KERNEL_NAME.img"
+EOF
+
+log "Generating initramfs for recovery mode..."
+if ! mkinitcpio -p "$KERNEL_NAME"; then
+    log "ERROR: Failed to generate recovery initramfs"
+    exit 1
+fi
+
+if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
+    log "ERROR: Recovery initramfs not found after generation!"
+    ls -la /boot/
+    exit 1
+fi
+
+log "Recovery initramfs generated successfully:"
+ls -lh /boot/initramfs-*.img
+
+log "Recovery system configuration completed!"
+RECOVERY_CHROOT_EOF
+
+        chmod +x /mnt/recovery/setup-recovery.sh
+        
+        log "Mounting necessary filesystems for recovery chroot..."
+        mount --bind /dev /mnt/recovery/dev || true
+        mount --bind /proc /mnt/recovery/proc || true
+        mount --bind /sys /mnt/recovery/sys || true
+        
+        log "Executing recovery configuration in chroot..."
+        if ! env \
+            RECOVERY_KERNEL="$KERNEL_NAME" \
+            RECOVERY_PARTITION="$RECOVERY_PART" \
+            RECOVERY_ROOT_PASS="$root_pass" \
+            chroot /mnt/recovery /setup-recovery.sh 2>&1 | tee -a "$LOG_FILE"; then
+            warning "Recovery chroot configuration had issues, but continuing..."
+        fi
+        
+        log "Unmounting recovery chroot filesystems..."
+        umount /mnt/recovery/sys 2>/dev/null || true
+        umount /mnt/recovery/proc 2>/dev/null || true
+        umount /mnt/recovery/dev 2>/dev/null || true
+        
+        rm -f /mnt/recovery/setup-recovery.sh
+        
+        log "Verifying recovery boot files..."
+        if [ ! -f "/mnt/recovery/boot/vmlinuz-${KERNEL_NAME}" ]; then
+            error "Recovery kernel missing after configuration"
+        fi
+        if [ ! -f "/mnt/recovery/boot/initramfs-${KERNEL_NAME}.img" ]; then
+            error "Recovery initramfs missing after configuration"
+        fi
+        
+        log "Recovery boot files verified:"
+        log "  - Kernel: /boot/vmlinuz-${KERNEL_NAME}"
+        log "  - Initramfs: /boot/initramfs-${KERNEL_NAME}.img"
+
+        log "Recovery partition setup completed successfully"
+    fi
+    
+    echo "20"
+    echo "XXX"
+    echo "Creating main system configuration script..."
+    echo "XXX"
+    
+    log "Creating chroot configuration script..."
+    
+    cat > /mnt/setup.sh <<'CHROOT_EOF'
+#!/bin/bash
+set -e
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+TIMEZONE="${SETUP_TIMEZONE}"
+LOCALE="${SETUP_LOCALE}"
+HOSTNAME="${SETUP_HOSTNAME}"
+USERNAME="${SETUP_USERNAME}"
+ROOT_PASS="${ROOT_PASSWORD}"
+USER_PASS="${USER_PASSWORD}"
+KERNEL_NAME="${SETUP_KERNEL}"
+BOOT_MODE="${SETUP_BOOTMODE}"
+DISK="${SETUP_DISK}"
+ROOT_PART="${SETUP_ROOT_PART}"
+BOOT_PART="${SETUP_BOOT_PART}"
+RECOVERY_PART="${SETUP_RECOVERY_PART}"
+ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
+ENABLE_ZRAM="${SETUP_ZRAM}"
+RECOVERY_UUID="${SETUP_RECOVERY_UUID}"
+
+log "Setting timezone to $TIMEZONE..."
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
+
+log "Configuring locale $LOCALE..."
+sed -i "s/^#${LOCALE}/${LOCALE}/" /etc/locale.gen
+if ! grep -q "^${LOCALE}" /etc/locale.gen; then
+    echo "${LOCALE}" >> /etc/locale.gen
+fi
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+
+log "Setting hostname to $HOSTNAME..."
+echo "$HOSTNAME" > /etc/hostname
+
+cat > /etc/hosts <<EOF
+127.0.0.1 localhost
+::1 localhost
+127.0.1.1 $HOSTNAME
+EOF
+
+log "Configuring pacman.conf and enabling multilib repository..."
+if grep -q "^#\[multilib\]" /etc/pacman.conf; then
+    sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
+    log "Multilib repository enabled"
+fi
+
+log "Setting up users..."
+echo "root:$ROOT_PASS" | chpasswd
+
+if ! id -u "$USERNAME" &>/dev/null; then
+    useradd -m -G wheel,storage,power,audio,video -s /bin/bash "$USERNAME"
+fi
+echo "$USERNAME:$USER_PASS" | chpasswd
+
+log "Configuring sudo access for wheel group..."
+sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+log "Setting up mkinitcpio..."
+if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
+    mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
+    rm -rf /etc/mkinitcpio.conf.d/
+fi
+
+log "Configuring mkinitcpio hooks for Bcachefs..."
+sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
+sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+
+log "Creating kernel preset for $KERNEL_NAME..."
+KVER=$(ls /usr/lib/modules | grep "$KERNEL_NAME" | head -n1)
+
+if [ -z "$KVER" ]; then
+    echo "ERROR: Kernel $KERNEL_NAME not found"
+    exit 1
+fi
+
+cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="\$(ls /usr/lib/modules | grep $KERNEL_NAME)"
+PRESETS=('default' 'fallback')
+default_image="/boot/initramfs-$KERNEL_NAME.img"
+fallback_image="/boot/initramfs-$KERNEL_NAME-fallback.img"
+fallback_options="-S autodetect"
+EOF
+
+log "Generating initramfs..."
+if ! mkinitcpio -P; then
+    log "ERROR: Failed to generate initramfs"
+    exit 1
+fi
+
+if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
+    log "ERROR: initramfs not found after generation"
+    exit 1
+fi
+
+if [ "$ENABLE_ZRAM" = "yes" ]; then
+    log "Configuring Zram..."
+    
+    cat > /usr/lib/systemd/zram-generator.conf <<EOF
+[zram0]
+zram-size = ram / 2
+compression-algorithm = lz4
+swap-priority = 100
+EOF
+
+    systemctl daemon-reload
+    log "Zram configuration completed"
+fi
+
+log "Installing GRUB bootloader for $BOOT_MODE mode..."
+
+if ! mountpoint -q /boot; then
+    log "ERROR: /boot is not mounted!"
+    exit 1
+fi
+
+if [ "$BOOT_MODE" = "UEFI" ]; then
+    log "Installing GRUB for UEFI..."
+    mkdir -p /boot/EFI/RengeOS
+    
+    if ! grub-install \
+        --target=x86_64-efi \
+        --efi-directory=/boot \
+        --bootloader-id=RengeOS \
+        --recheck \
+        --debug 2>&1 | tee -a /tmp/grub-install.log; then
+        log "ERROR: GRUB UEFI installation failed"
+        exit 1
+    fi
+else
+    log "Installing GRUB for Legacy BIOS..."
+    
+    if ! grub-install \
+        --target=i386-pc \
+        --boot-directory=/boot \
+        --recheck \
+        --debug \
+        "$DISK" 2>&1 | tee -a /tmp/grub-install.log; then
+        log "ERROR: GRUB BIOS installation failed"
+        exit 1
+    fi
+fi
+
+log "Configuring GRUB settings..."
+
+sed -i 's/GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR="RengeOS"/' /etc/default/grub
+
+if ! grep -q "GRUB_DEFAULT=saved" /etc/default/grub; then
+    sed -i 's/GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
+    echo "GRUB_SAVEDEFAULT=true" >> /etc/default/grub
+fi
+
+if ! grep -q "GRUB_DISABLE_SUBMENU" /etc/default/grub; then
+    echo "GRUB_DISABLE_SUBMENU=y" >> /etc/default/grub
+fi
+
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+
+if [[ "$DISK" == *"nvme"* ]]; then
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=bcachefs rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+else
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=bcachefs rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+fi
+
+sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
+sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=5/' /etc/default/grub
+
+if ! grep -q "GRUB_DISABLE_OS_PROBER" /etc/default/grub; then
+    echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+fi
+
+if [ "$ENABLE_RECOVERY" = "yes" ]; then
+    log "Adding Recovery Mode entry to GRUB..."
+    
+    cat > /etc/grub.d/40_custom <<EOF
+#!/bin/sh
+exec tail -n +3 \$0
+# This file provides an easy way to add custom menu entries. Simply type the
+# menu entries you want to add after this comment. Be careful not to change
+# the 'exec tail' line above.
+
+menuentry 'Recovery Mode' {
+    insmod part_gpt
+    insmod part_msdos
+    insmod xfs
+    search --no-floppy --fs-uuid --set=root $RECOVERY_UUID
+    linux /boot/vmlinuz-$KERNEL_NAME root=UUID=$RECOVERY_UUID rootfstype=xfs rw
+    initrd /boot/initramfs-$KERNEL_NAME.img
+}
+EOF
+    
+    chmod +x /etc/grub.d/40_custom
+    log "Recovery Mode entry added to GRUB (XFS-based, boots to root shell)"
+fi
+
+log "Generating GRUB configuration..."
+if ! grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tee -a /tmp/grub-mkconfig.log; then
+    log "ERROR: Failed to generate GRUB configuration"
+    exit 1
+fi
+
+log "Configuration completed successfully!"
+CHROOT_EOF
+    
+    chmod +x /mnt/setup.sh
+    
+    echo "30" ; sleep 1
+    echo "XXX"
+    echo "Executing configuration in chroot..."
+    echo "XXX"
+    
+    log "Executing configuration script..."
+    if ! env \
+        ROOT_PASSWORD="$root_pass" \
+        USER_PASSWORD="$user_pass" \
+        SETUP_TIMEZONE="$TIMEZONE" \
+        SETUP_LOCALE="$LOCALE" \
+        SETUP_HOSTNAME="$HOSTNAME" \
+        SETUP_USERNAME="$USERNAME" \
+        SETUP_KERNEL="$KERNEL_NAME" \
+        SETUP_BOOTMODE="$BOOT_MODE" \
+        SETUP_DISK="$DISK" \
+        SETUP_ROOT_PART="$ROOT_PART" \
+        SETUP_BOOT_PART="$BOOT_PART" \
+        SETUP_RECOVERY_PART="$RECOVERY_PART" \
+        SETUP_ENABLE_RECOVERY="$ENABLE_RECOVERY" \
+        SETUP_ZRAM="$enable_zram" \
+        SETUP_RECOVERY_UUID="$recovery_uuid" \
+        arch-chroot /mnt /setup.sh 2>&1 | tee -a "$LOG_FILE"; then
+        error "Failed to configure system"
+    fi
+    
+    rm -f /mnt/setup.sh
+    
+    unset root_pass root_pass_confirm user_pass user_pass_confirm
+    
+    echo "100"
+    echo "XXX"
+    echo "Configuration completed"
+    echo "XXX"
+    sleep 1
+    
+    ) | dialog --title "Step 3/5: System Configuration" --gauge "Configuring system..." 10 70 0
+    
+    success "System configuration completed"
+}
+
+finalize_installation() {
+    (
+    echo "10"
+    echo "XXX"
+    echo "Performing final checks..."
+    echo "XXX"
+    
+    log "Running final verification..."
+    
+    local check_failed=0
+    
+    if [ ! -f /mnt/boot/vmlinuz-${KERNEL_NAME} ]; then
+        warning "Kernel missing"
+        check_failed=1
+    fi
+    
+    if [ ! -f /mnt/boot/initramfs-${KERNEL_NAME}.img ]; then
+        warning "Initramfs missing"
+        check_failed=1
+    fi
+    
+    if [ ! -f /mnt/boot/grub/grub.cfg ]; then
+        warning "GRUB config missing"
+        check_failed=1
+    fi
+    
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        if [ ! -f /mnt/recovery/boot/vmlinuz-${KERNEL_NAME} ]; then
+            warning "Recovery kernel missing"
+            check_failed=1
+        fi
+    fi
+    
+    if [ $check_failed -eq 1 ]; then
+        error "Final verification failed!"
+    fi
+    
+    echo "50"
+    echo "XXX"
+    echo "Unmounting partitions..."
+    echo "XXX"
+    
+    log "Syncing filesystems..."
+    sync
+    sleep 3
+    
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        log "Unmounting recovery partition..."
+        if mountpoint -q /mnt/recovery; then
+            umount /mnt/recovery || umount -l /mnt/recovery 2>/dev/null || true
+        fi
+    fi
+    
+    log "Unmounting boot partition..."
+    if mountpoint -q /mnt/boot; then
+        umount /mnt/boot || umount -l /mnt/boot 2>/dev/null || true
+    fi
+    
+    log "Unmounting root partition..."
+    if mountpoint -q /mnt; then
+        umount /mnt || umount -l /mnt 2>/dev/null || true
+    fi
+    
+    echo "100"
+    echo "XXX"
+    echo "Installation complete!"
+    echo "XXX"
+    sleep 1
+    
+    ) | dialog --title "Step 4/5: Finalization" --gauge "Finalizing..." 10 70 0
+    
+    success "Installation completed successfully!"
+}
+
+show_completion_message() {
+    local recovery_info=""
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        recovery_info="\nRecovery Mode: ENABLED\n  - Access via GRUB menu: 'Recovery Mode'\n  - Boots to root shell for emergency rescue"
+    else
+        recovery_info="\nRecovery Mode: Not configured"
+    fi
+    
+    dialog --title "Installation Complete!" --msgbox "\
+RengeOS has been successfully installed!\n\n\
+Installation Summary:\n\
+  - Boot Mode: $BOOT_MODE\n\
+  - Disk: $DISK\n\
+  - Hostname: $HOSTNAME\n\
+  - User: $USERNAME\n\
+  - Kernel: $KERNEL_NAME$recovery_info\n\n\
+What's next:\n\
+  1. Remove installation media\n\
+  2. Reboot your system\n\
+  3. Enjoy RengeOS!\n\n\
+Log file: $LOG_FILE\n\n\
+Press OK to finish." 24 70
+}
+
+main() {
+    clear
+    
+    echo "========================================" > "$LOG_FILE"
+    echo "RengeOS Installation Log v3.4" >> "$LOG_FILE"
+    echo "========================================" >> "$LOG_FILE"
+    log "Installation started at $(date)"
+    
+    if [ "$EUID" -ne 0 ]; then
+        error "This script must be run as root"
+    fi
+    
+    check_dependencies
+    detect_boot_mode
+    
+    show_welcome || exit 0
+    select_disk
+    configure_boot_size
+    configure_recovery_mode
+    configure_system_settings
+    show_configuration_summary || exit 0
+    
+    dialog --title "FINAL WARNING" --defaultno --yesno "\
+This is your LAST CHANCE to cancel!\n\n\
+Disk: $DISK will be COMPLETELY ERASED!\n\n\
+Continue?" 10 50 || exit 0
+    
+    partition_disk
+    mount_and_extract
+    configure_system
+    finalize_installation
+    show_completion_message
+}
+
+trap 'error "Script failed at line $LINENO"' ERR
+
+main
