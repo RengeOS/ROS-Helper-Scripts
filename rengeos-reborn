@@ -23,6 +23,7 @@ KERNEL_NAME=""
 BOOT_MODE=""
 BOOT_FS=""
 ENABLE_RECOVERY="no"
+ROOT_FS="bcachefs"  # Default root filesystem
 
 # Logging functions
 log() {
@@ -163,11 +164,43 @@ Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_options[@]}" 3>
     
     info "Selected kernel: ${KERNEL_NAME}"
     
+    # Check if kernel is LTS and set root filesystem
+    if [[ "${KERNEL_NAME}" == *"lts"* ]] || [[ "${KERNEL_NAME}" == *"LTS"* ]]; then
+        ROOT_FS="xfs"
+        log "Kernel LTS detected, will use XFS for root partition"
+    else
+        # For non-LTS kernels, let user choose between bcachefs and xfs
+        local fs_choice
+        fs_choice=$(dialog --title "Root Filesystem Selection" --menu "\
+Kernel selected: ${KERNEL_NAME}\n\n\
+Select root filesystem type:\n\n\
+Bcachefs:\n\
+  - Modern copy-on-write filesystem\n\
+  - Built-in compression (LZ4)\n\
+  - Snapshots and checksums\n\n\
+XFS:\n\
+  - Stable and high performance\n\
+  - Mature filesystem\n\
+  - No compression by default\n\n\
+Which filesystem do you want for root?" 22 70 2 \
+            "bcachefs" "Bcachefs (with LZ4 compression)" \
+            "xfs" "XFS (stable, no compression)" \
+            3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            ROOT_FS="bcachefs"
+            warning "User cancelled, using default Bcachefs"
+        else
+            ROOT_FS="${fs_choice}"
+        fi
+    fi
+    
     dialog --title "Kernel Detection" --msgbox "\
 Kernel selected from RengeOS installation:\n\n\
   Kernel: ${KERNEL_NAME}\n\
+  Root Filesystem: ${ROOT_FS}\n\
   Location: ${kernel_path}/vmlinuz-${KERNEL_NAME}\n\n\
-This kernel will be used for installation." 12 70
+This kernel will be used for installation." 13 70
 }
 
 select_timezone() {
@@ -263,12 +296,12 @@ This installer will help you reinstall RengeOS on existing partitions:\n\
 Filesystem Layout:\n\
   UEFI Mode:\n\
     - EFI partition: Will be formatted as FAT32\n\
-    - Root partition: Will be formatted as Bcachefs with LZ4\n\
+    - Root partition: Will be formatted as selected filesystem\n\
   Legacy Mode:\n\
     - Boot partition: Will be formatted as XFS\n\
-    - Root partition: Will be formatted as Bcachefs with LZ4\n\n\
+    - Root partition: Will be formatted as selected filesystem\n\n\
 Performance OPTIMIZATIONS:\n\
-  - LZ4 compression (fast, ~60%% compression ratio)\n\
+  - LZ4 compression for Bcachefs (fast, ~60%% compression ratio)\n\
   - NoAtime mount (reduced disk I/O)\n\
   - TRIM/Discard for SSD performance\n\
   - CPU mitigations OFF (more FPS, less security)\n\
@@ -276,7 +309,7 @@ Performance OPTIMIZATIONS:\n\
   - Split lock detection disabled\n\n\
 WARNING: Selected partitions will be FORMATTED!\n\
          All data on selected partitions will be LOST!\n\n\
-Press OK to continue or Cancel to exit." 34 75
+Press OK to continue or Cancel to exit." 35 75
 }
 
 select_partitions() {
@@ -334,7 +367,7 @@ WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1
     
     ROOT_PART=$(dialog --title "Select Root Partition" --menu "\
 Select the Root Partition:\n\n\
-This partition will be formatted as Bcachefs with LZ4 compression.\n\n\
+This partition will be formatted as ${ROOT_FS}.\n\n\
 Found ${count} partition(s).\n\
 Use arrow keys to select, Enter to confirm.\n\n\
 WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1 1>&2 2>&3) || exit 0
@@ -397,7 +430,7 @@ BOOT/EFI Partition:\n\
   Current info:\n${boot_info}\n\n\
 ROOT Partition:\n\
   Device: ${ROOT_PART}\n\
-  Will be formatted as: Bcachefs (LZ4 compression)\n\
+  Will be formatted as: ${ROOT_FS}\n\
   Current info:\n${root_info}${recovery_info}\n\n\
 WARNING: Boot and Root partitions will be FORMATTED!\n\
          Recovery (if selected) will NOT be formatted.\n\n\
@@ -461,7 +494,7 @@ PARTITION CONFIGURATION:\n\
   Parent Disk: ${DISK}\n\
   Boot Mode: ${BOOT_MODE}\n\
   Boot/EFI: ${BOOT_PART} → ${boot_fs_display} (WILL BE FORMATTED)\n\
-  Root: ${ROOT_PART} → Bcachefs (WILL BE FORMATTED)\n\
+  Root: ${ROOT_PART} → ${ROOT_FS} (WILL BE FORMATTED)\n\
   Recovery: ${recovery_status} (will be added to GRUB)\n\n\
 SYSTEM CONFIGURATION:\n\
   Hostname: ${HOSTNAME}\n\
@@ -503,10 +536,10 @@ format_partitions() {
     echo "10"
     sleep 1
     echo "XXX"
-    echo "Formatting root partition with Bcachefs..."
+    echo "Formatting root partition with ${ROOT_FS}..."
     echo "XXX"
 
-    log "Formatting ${ROOT_PART} with Bcachefs..."
+    log "Formatting ${ROOT_PART} with ${ROOT_FS}..."
 
     # Wipe partition signature
     wipefs -af "${ROOT_PART}" >/dev/null 2>&1 || {
@@ -514,21 +547,38 @@ format_partitions() {
     }
     sleep 2
 
-    log "Attempting to format ${ROOT_PART} with Bcachefs..."
-    
-    if ! bcachefs format \
-        --force \
-        --compression=lz4 \
-        --background_compression=lz4 \
-        --metadata_replicas=1 \
-        --data_replicas=1 \
-        --acl \
-        --label=RengeOS_Root \
-        "${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
-        log "Failed to format root partition with bcachefs"
+    if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+        log "Formatting ${ROOT_PART} with Bcachefs..."
+        
+        if ! bcachefs format \
+            --force \
+            --compression=lz4 \
+            --background_compression=lz4 \
+            --metadata_replicas=1 \
+            --data_replicas=1 \
+            --acl \
+            --label=RengeOS_Root \
+            "${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
+            error "Failed to format root partition with bcachefs"
+        fi
+        
+        log "Bcachefs root partition formatted successfully"
+    else
+        log "Formatting ${ROOT_PART} with XFS (optimized for LTS kernel)..."
+        
+        if ! mkfs.xfs -f \
+            -i size=512 \
+            -n size=8192 \
+            -d agcount=4 \
+            -l size=128m \
+            -m crc=1 \
+            -L RengeOS_Root \
+            "${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
+            error "Failed to format root partition with XFS"
+        fi
+        
+        log "XFS root partition formatted successfully"
     fi
-    
-    log "Bcachefs root partition formatted successfully"
 
     echo "50"
     echo "XXX"
@@ -588,8 +638,14 @@ mount_and_extract() {
     
     mkdir -p /mnt
     
-    if ! mount -t bcachefs -o noatime,discard "${ROOT_PART}" /mnt; then
-        error "Failed to mount root partition"
+    if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+        if ! mount -t bcachefs -o noatime,discard "${ROOT_PART}" /mnt; then
+            error "Failed to mount root partition"
+        fi
+    else
+        if ! mount -t xfs -o noatime,discard "${ROOT_PART}" /mnt; then
+            error "Failed to mount root partition"
+        fi
     fi
     
     log "Root partition mounted successfully"
@@ -695,8 +751,8 @@ mount_and_extract() {
 # /etc/fstab: static file system information
 # <file system> <mount point> <type> <options> <dump> <pass>
 
-# Root filesystem - Bcachefs with compression
-UUID=${root_uuid} / bcachefs noatime,discard 0 0
+# Root filesystem
+UUID=${root_uuid} / ${ROOT_FS} noatime,discard 0 0
 
 FSTAB_EOF
 
@@ -841,6 +897,7 @@ BOOT_PART="${SETUP_BOOT_PART}"
 RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
+ROOT_FS="${SETUP_ROOT_FS}"
 
 log "Setting timezone to ${TIMEZONE}..."
 ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
@@ -886,9 +943,17 @@ if [[ -f /etc/mkinitcpio.conf.d/archiso.conf ]]; then
     rm -rf /etc/mkinitcpio.conf.d/
 fi
 
-log "Configuring mkinitcpio hooks for Bcachefs..."
+log "Configuring mkinitcpio hooks for ${ROOT_FS}..."
+if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+    sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+else
+    sed -i 's/^MODULES=.*/MODULES=(xfs)/' /etc/mkinitcpio.conf
+fi
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
-sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+
+log "Cleaning up duplicate kernel presets..."
+# Remove all preset files first
+rm -f /etc/mkinitcpio.d/*.preset 2>/dev/null || true
 
 log "Creating kernel preset for ${KERNEL_NAME}..."
 KVER=$(ls /usr/lib/modules | grep "${KERNEL_NAME}" | head -n1)
@@ -900,10 +965,6 @@ if [[ -z "${KVER}" ]]; then
 fi
 
 log "Found kernel version: ${KVER}"
-
-if [[ -e "/etc/mkinitcpio.d/${KERNEL_NAME}.preset" ]]; then
-    rm -rf "/etc/mkinitcpio.d/${KERNEL_NAME}.preset"
-fi
 
 cat >"/etc/mkinitcpio.d/${KERNEL_NAME}.preset" <<PRESET_EOF
 ALL_config="/etc/mkinitcpio.conf"
@@ -1002,9 +1063,9 @@ fi
 ROOT_UUID=$(blkid -s UUID -o value "${ROOT_PART}")
 
 if [[ "${DISK}" == *"nvme"* ]]; then
-    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=bcachefs rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FS} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
 else
-    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=bcachefs rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FS} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
 fi
 
 sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
@@ -1071,6 +1132,7 @@ CHROOT_EOF
         SETUP_RECOVERY_PART="${RECOVERY_PART}" \
         SETUP_ENABLE_RECOVERY="${ENABLE_RECOVERY}" \
         SETUP_ZRAM="${enable_zram}" \
+        SETUP_ROOT_FS="${ROOT_FS}" \
         arch-chroot /mnt /setup.sh 2>&1 | tee -a "${LOG_FILE}"; then
         error "Failed to configure system"
     fi
@@ -1162,7 +1224,7 @@ RengeOS has been successfully reinstalled!\n\n\
 Installation Summary:\n\
   - Boot Mode: ${BOOT_MODE}\n\
   - Boot/EFI: ${BOOT_PART}\n\
-  - Root: ${ROOT_PART}${recovery_info}\n\
+  - Root: ${ROOT_PART} (${ROOT_FS})${recovery_info}\n\
   - Hostname: ${HOSTNAME}\n\
   - User: ${USERNAME}\n\
   - Kernel: ${KERNEL_NAME}\n\n\
