@@ -10,7 +10,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Global variables
-LOG_FILE="/tmp/rengeos-reborn.log"
+LOG_FILE="/tmp/ros-reborn.log"
 DISK=""
 BOOT_PART=""
 ROOT_PART=""
@@ -965,7 +965,7 @@ log "Configuring mkinitcpio hooks for ${ROOT_FS}..."
 if [[ "${ROOT_FS}" == "bcachefs" ]]; then
     sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
 else
-    sed -i 's/^MODULES=.*/MODULES=(xfs)/' /etc/mkinitcpio.conf
+    sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
 fi
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
 

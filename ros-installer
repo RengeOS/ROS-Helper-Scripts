@@ -8,7 +8,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-LOG_FILE="/tmp/rengeos-install.log"
+LOG_FILE="/tmp/ros-installer.log"
 DISK=""
 BOOT_PART=""
 ROOT_PART=""
@@ -1398,7 +1398,7 @@ sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard k
 if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
     sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
 else
-    sed -i 's/^MODULES=.*/MODULES=(xfs)/' /etc/mkinitcpio.conf
+    sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
 fi
 
 log "Creating kernel preset for $KERNEL_NAME..."
