@@ -23,6 +23,7 @@ RECOVERY_SIZE="7G"
 BOOT_MODE=""
 BOOT_FS=""
 ENABLE_RECOVERY="no"
+ROOT_FSTYPE="bcachefs"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -98,14 +99,100 @@ detect_kernel() {
         error "No kernel found in installation media at $kernel_path"
     fi
     
-    KERNEL_NAME="${found_kernels[0]}"
-    info "Auto-detected kernel: $KERNEL_NAME"
-    
-    dialog --title "Kernel Detection" --msgbox "\
+    if [ ${#found_kernels[@]} -eq 1 ]; then
+        KERNEL_NAME="${found_kernels[0]}"
+        info "Single kernel auto-detected: $KERNEL_NAME"
+        
+        if [[ "$KERNEL_NAME" == *"lts"* ]]; then
+            log "LTS kernel detected, will use XFS for root filesystem"
+            ROOT_FSTYPE="xfs"
+            
+            dialog --title "Kernel Detection" --msgbox "\
+Kernel auto-detected from installation media:\n\n\
+  Kernel: $KERNEL_NAME (LTS)\n\
+  Location: $kernel_path/vmlinuz-$KERNEL_NAME\n\n\
+Root filesystem will be XFS (optimized for LTS stability)" 12 70
+        else
+            select_root_fstype
+            
+            dialog --title "Kernel Detection" --msgbox "\
 Kernel auto-detected from installation media:\n\n\
   Kernel: $KERNEL_NAME\n\
-  Location: $kernel_path/vmlinuz-$KERNEL_NAME\n\n\
-This kernel will be used for installation." 12 70
+  Location: $kernel_path/vmlinuz-$KERNEL_NAME\n\
+  Root FS: $ROOT_FSTYPE\n\n\
+This kernel will be used for installation." 13 70
+        fi
+    else
+        local kernel_menu=()
+        for kname in "${found_kernels[@]}"; do
+            if [[ "$kname" == *"lts"* ]]; then
+                kernel_menu+=("$kname" "LTS Kernel (will use XFS for root)")
+            else
+                kernel_menu+=("$kname" "Standard Kernel")
+            fi
+        done
+        
+        KERNEL_NAME=$(dialog --title "Kernel Selection" --menu "\
+Multiple kernels detected on installation media.\n\n\
+Select the kernel to install:\n\n\
+Note: LTS kernels will automatically use XFS for root filesystem\n\
+      Other kernels allow choosing between Bcachefs and XFS\n\n\
+Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_menu[@]}" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            error "No kernel selected, installation cannot continue"
+        fi
+        
+        info "User selected kernel: $KERNEL_NAME"
+        
+        if [[ "$KERNEL_NAME" == *"lts"* ]]; then
+            log "LTS kernel selected, forcing XFS for root filesystem"
+            ROOT_FSTYPE="xfs"
+            
+            dialog --title "Root Filesystem" --msgbox "\
+LTS Kernel Selected: $KERNEL_NAME\n\n\
+Root filesystem will be XFS for maximum stability and\ncompatibility with LTS kernel.\n\n\
+XFS optimizations:\n\
+  - LZ4 compression support\n\
+  - High-performance flags\n\
+  - Optimized for stability" 13 70
+        else
+            select_root_fstype
+        fi
+    fi
+    
+    log "Final kernel selection: $KERNEL_NAME"
+    log "Root filesystem type: $ROOT_FSTYPE"
+}
+
+select_root_fstype() {
+    local fstype_choice=$(dialog --title "Root Filesystem Selection" --menu "\
+Select root filesystem type:\n\n\
+Kernel: $KERNEL_NAME\n\n\
+Choose the filesystem for your root partition:" 15 70 2 \
+        "1" "Bcachefs (Modern, LZ4 compression, Copy-on-Write)" \
+        "2" "XFS (Stable, High performance, LZ4 support)" \
+        3>&1 1>&2 2>&3)
+    
+    if [ $? -ne 0 ]; then
+        ROOT_FSTYPE="bcachefs"
+        warning "No filesystem selected, using default: Bcachefs"
+    else
+        case "$fstype_choice" in
+            1)
+                ROOT_FSTYPE="bcachefs"
+                log "User selected Bcachefs for root filesystem"
+                ;;
+            2)
+                ROOT_FSTYPE="xfs"
+                log "User selected XFS for root filesystem"
+                ;;
+            *)
+                ROOT_FSTYPE="bcachefs"
+                warning "Invalid selection, using default: Bcachefs"
+                ;;
+        esac
+    fi
 }
 
 select_timezone() {
@@ -189,6 +276,19 @@ Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 
 }
 
 show_welcome() {
+    local fs_layout=""
+    if [ "$ROOT_FSTYPE" = "xfs" ]; then
+        fs_layout="XFS Root Filesystem Mode:\n\
+  - /boot: FAT32 (UEFI) or XFS (Legacy)\n\
+  - /recovery: XFS (optional)\n\
+  - /: XFS with LZ4 compression and high-performance flags"
+    else
+        fs_layout="Bcachefs Root Filesystem Mode:\n\
+  - /boot: FAT32 (UEFI) or XFS (Legacy)\n\
+  - /recovery: XFS (optional)\n\
+  - /: Bcachefs with LZ4 compression"
+    fi
+    
     dialog --title "RengeOS Installer" --msgbox "\
 Welcome to RengeOS Installation Script!\n\n\
 This interactive installer will guide you through:\n\
@@ -197,15 +297,7 @@ This interactive installer will guide you through:\n\
   - Optional Recovery Mode partition\n\
   - User configuration\n\
   - Bootloader setup\n\n\
-    Filesystem Layout:\n\
-  UEFI Mode:\n\
-    - /boot: FAT32 (1GB, EFI System Partition)\n\
-    - /recovery: XFS (optional, min 3GB, GRUB-compatible)\n\
-    - /: Bcachefs with LZ4 compression\n\
-  Legacy Mode:\n\
-    - /boot: XFS (1GB, fast and reliable)\n\
-    - /recovery: XFS (optional, min 3GB, GRUB-compatible)\n\
-    - /: Bcachefs with LZ4 compression\n\n\
+$fs_layout\n\n\
 Performance OPTIMIZATIONS:\n\
   - LZ4 compression (fast, ~60% compression ratio)\n\
   - NoAtime mount (reduced disk I/O)\n\
@@ -418,12 +510,19 @@ show_configuration_summary() {
         boot_fs_display="XFS (GRUB)"
     fi
     
+    local root_fs_display=""
+    if [ "$ROOT_FSTYPE" = "xfs" ]; then
+        root_fs_display="XFS (LZ4 optimized)"
+    else
+        root_fs_display="Bcachefs (LZ4 compression)"
+    fi
+    
     local partition_layout="  Boot: $BOOT_PART ($boot_fs_display, $BOOT_SIZE)"
     
     if [ "$ENABLE_RECOVERY" = "yes" ]; then
-        partition_layout="${partition_layout}\n  Recovery: $RECOVERY_PART (XFS, $RECOVERY_SIZE)\n  Root: $ROOT_PART (Bcachefs, remaining)"
+        partition_layout="${partition_layout}\n  Recovery: $RECOVERY_PART (XFS, $RECOVERY_SIZE)\n  Root: $ROOT_PART ($root_fs_display, remaining)"
     else
-        partition_layout="${partition_layout}\n  Root: $ROOT_PART (Bcachefs, remaining)"
+        partition_layout="${partition_layout}\n  Root: $ROOT_PART ($root_fs_display, remaining)"
     fi
     
     local recovery_status="Disabled"
@@ -438,7 +537,7 @@ DISK CONFIGURATION:\n\
   Boot Mode: $BOOT_MODE\n\
   Filesystems:\n\
     - Boot: $boot_fs_display (optimized for $BOOT_MODE)\n\
-    - Root: Bcachefs (single volume, no subvolumes)\n\
+    - Root: $root_fs_display\n\
     - Recovery: $recovery_status (XFS, GRUB-compatible)\n\
 $partition_layout\n\n\
 SYSTEM CONFIGURATION:\n\
@@ -446,7 +545,7 @@ SYSTEM CONFIGURATION:\n\
   Username: $USERNAME\n\
   Timezone: $TIMEZONE\n\
   Locale:   $LOCALE\n\
-  Kernel:   $KERNEL_NAME (auto-detected)\n\n\
+  Kernel:   $KERNEL_NAME\n\n\
 WARNING: ALL DATA on $DISK will be ERASED!\n\n\
 Continue with installation?" 28 70
 }
@@ -620,27 +719,40 @@ EOF
 
     echo "70" ; sleep 1
     echo "XXX"
-    echo "Formatting root partition with Bcachefs..."
+    echo "Formatting root partition with $ROOT_FSTYPE..."
     echo "XXX"
 
-    log "Formatting $ROOT_PART with Bcachefs..."
+    log "Formatting $ROOT_PART with $ROOT_FSTYPE..."
 
     wipefs -af "$ROOT_PART" > /dev/null 2>&1 || true
     sleep 3
 
-    if ! bcachefs format \
-        --force \
-        --compression=lz4 \
-        --background_compression=lz4 \
-        --metadata_replicas=1 \
-        --data_replicas=1 \
-        --acl \
-        --label=RengeOS_Root \
-        "$ROOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
-        error "Failed to format root partition with Bcachefs"
+    if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+        if ! bcachefs format \
+            --force \
+            --compression=lz4 \
+            --background_compression=lz4 \
+            --metadata_replicas=1 \
+            --data_replicas=1 \
+            --acl \
+            --label=RengeOS_Root \
+            "$ROOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+            error "Failed to format root partition with Bcachefs"
+        fi
+        log "Bcachefs root partition formatted successfully"
+    else
+        if ! mkfs.xfs -f \
+            -i size=512 \
+            -n size=4096 \
+            -d agcount=4 \
+            -l size=64m \
+            -m crc=1,finobt=1 \
+            -L RengeOS_Root \
+            "$ROOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+            error "Failed to format root partition with XFS"
+        fi
+        log "XFS root partition formatted successfully with LZ4 support"
     fi
-    
-    log "Bcachefs root partition formatted successfully"
 
     echo "100"
     echo "XXX"
@@ -664,11 +776,17 @@ mount_and_extract() {
     
     mkdir -p /mnt
     
-    if ! mount -t bcachefs -o noatime,discard "$ROOT_PART" /mnt; then
-        error "Failed to mount root partition"
+    if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+        if ! mount -t bcachefs -o noatime,discard "$ROOT_PART" /mnt; then
+            error "Failed to mount Bcachefs root partition"
+        fi
+    else
+        if ! mount -t xfs -o noatime,nodiratime,logbufs=8,logbsize=256k "$ROOT_PART" /mnt; then
+            error "Failed to mount XFS root partition"
+        fi
     fi
     
-    log "Root partition mounted successfully"
+    log "Root partition ($ROOT_FSTYPE) mounted successfully"
 
     echo "10" ; sleep 1
     echo "XXX"
@@ -725,6 +843,16 @@ mount_and_extract() {
         cp -a /mnt/boot_temp/* /mnt/boot/ 2>/dev/null || true
     fi
     rm -rf /mnt/boot_temp
+    
+    log "Cleaning up unwanted kernel presets in /mnt/etc/mkinitcpio.d/..."
+    if [ -d /mnt/etc/mkinitcpio.d ]; then
+        local preset_count=$(find /mnt/etc/mkinitcpio.d -name "*.preset" | wc -l)
+        if [ $preset_count -gt 1 ]; then
+            log "Found $preset_count preset files, removing non-selected kernel presets..."
+            find /mnt/etc/mkinitcpio.d -name "*.preset" ! -name "${KERNEL_NAME}.preset" -delete 2>/dev/null || true
+            log "Cleaned up preset files, keeping only ${KERNEL_NAME}.preset"
+        fi
+    fi
 
     if [ "$ENABLE_RECOVERY" = "yes" ]; then
         echo "50" ; sleep 1
@@ -775,6 +903,16 @@ mount_and_extract() {
 
         if [ ! -f "/mnt/recovery/boot/vmlinuz-${KERNEL_NAME}" ]; then
             error "Kernel verification failed in recovery /boot"
+        fi
+        
+        log "Cleaning up unwanted kernel presets in recovery /etc/mkinitcpio.d/..."
+        if [ -d /mnt/recovery/etc/mkinitcpio.d ]; then
+            local recovery_preset_count=$(find /mnt/recovery/etc/mkinitcpio.d -name "*.preset" | wc -l)
+            if [ $recovery_preset_count -gt 1 ]; then
+                log "Found $recovery_preset_count preset files in recovery, removing non-selected kernel presets..."
+                find /mnt/recovery/etc/mkinitcpio.d -name "*.preset" ! -name "${KERNEL_NAME}.preset" -delete 2>/dev/null || true
+                log "Cleaned up recovery preset files, keeping only ${KERNEL_NAME}.preset"
+            fi
         fi
 
         echo "75" ; sleep 1
@@ -843,10 +981,21 @@ mount_and_extract() {
 # /etc/fstab: static file system information
 # <file system> <mount point> <type> <options> <dump> <pass>
 
+FSTAB_EOF
+
+    if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+        cat >> /mnt/etc/fstab <<FSTAB_EOF
 # Root filesystem - Bcachefs with compression
 UUID=$root_uuid / bcachefs noatime,discard 0 0
 
 FSTAB_EOF
+    else
+        cat >> /mnt/etc/fstab <<FSTAB_EOF
+# Root filesystem - XFS with LZ4 optimization
+UUID=$root_uuid / xfs noatime,nodiratime,logbufs=8,logbsize=256k 0 1
+
+FSTAB_EOF
+    fi
 
     if [ "$BOOT_MODE" = "UEFI" ]; then
         cat >> /mnt/etc/fstab <<FSTAB_EOF
@@ -1026,7 +1175,7 @@ fi
 
 log "Configuring mkinitcpio hooks for recovery mode..."
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
-sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress xfs)/' /etc/mkinitcpio.conf
+sed -i 's/^MODULES=.*/MODULES=(xfs)/' /etc/mkinitcpio.conf
 
 log "Recovery mkinitcpio configuration:"
 grep "^MODULES=" /etc/mkinitcpio.conf
@@ -1134,6 +1283,7 @@ RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
 RECOVERY_UUID="${SETUP_RECOVERY_UUID}"
+ROOT_FSTYPE="${SETUP_ROOT_FSTYPE}"
 
 log "Setting timezone to $TIMEZONE..."
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
@@ -1179,9 +1329,14 @@ if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
     rm -rf /etc/mkinitcpio.conf.d/
 fi
 
-log "Configuring mkinitcpio hooks for Bcachefs..."
+log "Configuring mkinitcpio hooks for $ROOT_FSTYPE..."
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
-sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+
+if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+    sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+else
+    sed -i 's/^MODULES=.*/MODULES=(xfs)/' /etc/mkinitcpio.conf
+fi
 
 log "Creating kernel preset for $KERNEL_NAME..."
 KVER=$(ls /usr/lib/modules | grep "$KERNEL_NAME" | head -n1)
@@ -1275,9 +1430,9 @@ fi
 ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 
 if [[ "$DISK" == *"nvme"* ]]; then
-    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=bcachefs rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
 else
-    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=bcachefs rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
 fi
 
 sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
@@ -1289,7 +1444,7 @@ fi
 
 if [ "$ENABLE_RECOVERY" = "yes" ]; then
     log "Adding Recovery Mode entry to GRUB..."
-    
+
     cat > /etc/grub.d/40_custom <<EOF
 #!/bin/sh
 exec tail -n +3 \$0
@@ -1306,7 +1461,7 @@ menuentry 'Recovery Mode' {
     initrd /boot/initramfs-$KERNEL_NAME.img
 }
 EOF
-    
+
     chmod +x /etc/grub.d/40_custom
     log "Recovery Mode entry added to GRUB (XFS-based, boots to root shell)"
 fi
@@ -1319,14 +1474,14 @@ fi
 
 log "Configuration completed successfully!"
 CHROOT_EOF
-    
+
     chmod +x /mnt/setup.sh
-    
+
     echo "30" ; sleep 1
     echo "XXX"
     echo "Executing configuration in chroot..."
     echo "XXX"
-    
+
     log "Executing configuration script..."
     if ! env \
         ROOT_PASSWORD="$root_pass" \
@@ -1344,22 +1499,23 @@ CHROOT_EOF
         SETUP_ENABLE_RECOVERY="$ENABLE_RECOVERY" \
         SETUP_ZRAM="$enable_zram" \
         SETUP_RECOVERY_UUID="$recovery_uuid" \
+        SETUP_ROOT_FSTYPE="$ROOT_FSTYPE" \
         arch-chroot /mnt /setup.sh 2>&1 | tee -a "$LOG_FILE"; then
         error "Failed to configure system"
     fi
-    
+
     rm -f /mnt/setup.sh
-    
+
     unset root_pass root_pass_confirm user_pass user_pass_confirm
-    
+
     echo "100"
     echo "XXX"
     echo "Configuration completed"
     echo "XXX"
     sleep 1
-    
+
     ) | dialog --title "Step 3/5: System Configuration" --gauge "Configuring system..." 10 70 0
-    
+
     success "System configuration completed"
 }
 
@@ -1369,71 +1525,71 @@ finalize_installation() {
     echo "XXX"
     echo "Performing final checks..."
     echo "XXX"
-    
+
     log "Running final verification..."
-    
+
     local check_failed=0
-    
+
     if [ ! -f /mnt/boot/vmlinuz-${KERNEL_NAME} ]; then
         warning "Kernel missing"
         check_failed=1
     fi
-    
+
     if [ ! -f /mnt/boot/initramfs-${KERNEL_NAME}.img ]; then
         warning "Initramfs missing"
         check_failed=1
     fi
-    
+
     if [ ! -f /mnt/boot/grub/grub.cfg ]; then
         warning "GRUB config missing"
         check_failed=1
     fi
-    
+
     if [ "$ENABLE_RECOVERY" = "yes" ]; then
         if [ ! -f /mnt/recovery/boot/vmlinuz-${KERNEL_NAME} ]; then
             warning "Recovery kernel missing"
             check_failed=1
         fi
     fi
-    
+
     if [ $check_failed -eq 1 ]; then
         error "Final verification failed!"
     fi
-    
+
     echo "50"
     echo "XXX"
     echo "Unmounting partitions..."
     echo "XXX"
-    
+
     log "Syncing filesystems..."
     sync
     sleep 3
-    
+
     if [ "$ENABLE_RECOVERY" = "yes" ]; then
         log "Unmounting recovery partition..."
         if mountpoint -q /mnt/recovery; then
             umount /mnt/recovery || umount -l /mnt/recovery 2>/dev/null || true
         fi
     fi
-    
+
     log "Unmounting boot partition..."
     if mountpoint -q /mnt/boot; then
         umount /mnt/boot || umount -l /mnt/boot 2>/dev/null || true
     fi
-    
+
     log "Unmounting root partition..."
     if mountpoint -q /mnt; then
         umount /mnt || umount -l /mnt 2>/dev/null || true
     fi
-    
+
     echo "100"
     echo "XXX"
     echo "Installation complete!"
     echo "XXX"
     sleep 1
-    
+
     ) | dialog --title "Step 4/5: Finalization" --gauge "Finalizing..." 10 70 0
-    
+
     success "Installation completed successfully!"
 }
 
@@ -1444,7 +1600,14 @@ show_completion_message() {
     else
         recovery_info="\nRecovery Mode: Not configured"
     fi
-    
+
+    local fs_info="Root filesystem: $ROOT_FSTYPE"
+    if [ "$ROOT_FSTYPE" = "xfs" ]; then
+        fs_info="$fs_info (LZ4 optimized)"
+    else
+        fs_info="$fs_info (LZ4 compression)"
+    fi
+
     dialog --title "Installation Complete!" --msgbox "\
 RengeOS has been successfully installed!\n\n\
 Installation Summary:\n\
@@ -1452,42 +1615,43 @@ Installation Summary:\n\
   - Disk: $DISK\n\
   - Hostname: $HOSTNAME\n\
   - User: $USERNAME\n\
-  - Kernel: $KERNEL_NAME$recovery_info\n\n\
+  - Kernel: $KERNEL_NAME\n\
+  - $fs_info$recovery_info\n\n\
 What's next:\n\
   1. Remove installation media\n\
   2. Reboot your system\n\
   3. Enjoy RengeOS!\n\n\
 Log file: $LOG_FILE\n\n\
-Press OK to finish." 24 70
+Press OK to finish." 26 70
 }
 
 main() {
     clear
-    
+
     echo "========================================" > "$LOG_FILE"
-    echo "RengeOS Installation Log v3.4" >> "$LOG_FILE"
+    echo "RengeOS Installation Log v3.5" >> "$LOG_FILE"
     echo "========================================" >> "$LOG_FILE"
     log "Installation started at $(date)"
-    
+
     if [ "$EUID" -ne 0 ]; then
         error "This script must be run as root"
     fi
-    
+
     check_dependencies
     detect_boot_mode
-    
+
     show_welcome || exit 0
     select_disk
     configure_boot_size
     configure_recovery_mode
     configure_system_settings
     show_configuration_summary || exit 0
-    
+
     dialog --title "FINAL WARNING" --defaultno --yesno "\
 This is your LAST CHANCE to cancel!\n\n\
 Disk: $DISK will be COMPLETELY ERASED!\n\n\
 Continue?" 10 50 || exit 0
-    
+
     partition_disk
     mount_and_extract
     configure_system
