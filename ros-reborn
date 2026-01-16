@@ -24,6 +24,7 @@ BOOT_MODE=""
 BOOT_FS=""
 ENABLE_RECOVERY="no"
 ROOT_FS="bcachefs"  # Default root filesystem
+OTHER_KERNELS=""    # Các kernel không được chọn
 
 # Logging functions
 log() {
@@ -158,8 +159,19 @@ Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_options[@]}" 3>
             KERNEL_NAME="${found_kernels[0]}"
             warning "No kernel selected, using first: ${KERNEL_NAME}"
         fi
+        
+        # Lưu các kernel không được chọn
+        OTHER_KERNELS=""
+        for kname in "${found_kernels[@]}"; do
+            if [[ "${kname}" != "${KERNEL_NAME}" ]]; then
+                OTHER_KERNELS+="${kname} "
+            fi
+        done
+        OTHER_KERNELS=$(echo "${OTHER_KERNELS}" | xargs)  # Xóa khoảng trắng thừa
+        log "Kernels to remove: ${OTHER_KERNELS}"
     else
         KERNEL_NAME="${found_kernels[0]}"
+        OTHER_KERNELS=""
     fi
     
     info "Selected kernel: ${KERNEL_NAME}"
@@ -488,6 +500,11 @@ show_configuration_summary() {
         recovery_status="Enabled: ${RECOVERY_PART}"
     fi
     
+    local other_kernels_info=""
+    if [[ -n "${OTHER_KERNELS}" ]]; then
+        other_kernels_info="\n  Other kernels to remove: ${OTHER_KERNELS}"
+    fi
+    
     dialog --title "Configuration Summary" --yesno "\
 Please review your configuration:\n\n\
 PARTITION CONFIGURATION:\n\
@@ -501,7 +518,7 @@ SYSTEM CONFIGURATION:\n\
   Username: ${USERNAME}\n\
   Timezone: ${TIMEZONE}\n\
   Locale:   ${LOCALE}\n\
-  Kernel:   ${KERNEL_NAME} (auto-detected)\n\n\
+  Kernel:   ${KERNEL_NAME} (auto-detected)${other_kernels_info}\n\n\
 WARNING: Selected partitions will be FORMATTED!\n\
          ALL DATA will be LOST!\n\n\
 Continue with installation?" 24 70
@@ -898,6 +915,7 @@ RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
 ROOT_FS="${SETUP_ROOT_FS}"
+OTHER_KERNELS="${OTHER_KERNELS}"
 
 log "Setting timezone to ${TIMEZONE}..."
 ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
@@ -998,6 +1016,18 @@ fi
 
 log "Initramfs generated successfully"
 ls -lh /boot/initramfs-*.img
+
+# Xóa các kernel không được chọn nếu có
+if [[ -n "${OTHER_KERNELS}" ]]; then
+    log "Removing unselected kernels: ${OTHER_KERNELS}"
+    for kernel in ${OTHER_KERNELS}; do
+        log "Removing kernel: ${kernel} and its headers"
+        # Xóa kernel package và headers package
+        pacman -R --noconfirm "${kernel}" "${kernel}-headers" 2>/dev/null || {
+            log "Warning: Failed to remove kernel ${kernel} or it was not installed"
+        }
+    done
+fi
 
 if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
     log "Configuring Zram..."
@@ -1133,6 +1163,7 @@ CHROOT_EOF
         SETUP_ENABLE_RECOVERY="${ENABLE_RECOVERY}" \
         SETUP_ZRAM="${enable_zram}" \
         SETUP_ROOT_FS="${ROOT_FS}" \
+        OTHER_KERNELS="${OTHER_KERNELS}" \
         arch-chroot /mnt /setup.sh 2>&1 | tee -a "${LOG_FILE}"; then
         error "Failed to configure system"
     fi
@@ -1219,6 +1250,11 @@ show_completion_message() {
         recovery_info="\n  - Recovery: ${RECOVERY_PART} (registered in GRUB)"
     fi
     
+    local other_kernels_info=""
+    if [[ -n "${OTHER_KERNELS}" ]]; then
+        other_kernels_info="\n  - Other kernels removed: ${OTHER_KERNELS}"
+    fi
+    
     dialog --title "Installation Complete!" --msgbox "\
 RengeOS has been successfully reinstalled!\n\n\
 Installation Summary:\n\
@@ -1227,7 +1263,7 @@ Installation Summary:\n\
   - Root: ${ROOT_PART} (${ROOT_FS})${recovery_info}\n\
   - Hostname: ${HOSTNAME}\n\
   - User: ${USERNAME}\n\
-  - Kernel: ${KERNEL_NAME}\n\n\
+  - Kernel: ${KERNEL_NAME} (installed)${other_kernels_info}\n\n\
 What's next:\n\
   1. Remove installation media\n\
   2. Reboot your system\n\

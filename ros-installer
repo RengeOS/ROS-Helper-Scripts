@@ -24,6 +24,8 @@ BOOT_MODE=""
 BOOT_FS=""
 ENABLE_RECOVERY="no"
 ROOT_FSTYPE="bcachefs"
+ALL_KERNELS=()
+KERNELS_TO_REMOVE=()
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -87,6 +89,7 @@ detect_boot_mode() {
 detect_kernel() {
     local kernel_path="/run/archiso/bootmnt/arch/boot/x86_64"
     local found_kernels=()
+    ALL_KERNELS=()
     
     if [ -d "$kernel_path" ]; then
         while IFS= read -r kernel_file; do
@@ -99,8 +102,11 @@ detect_kernel() {
         error "No kernel found in installation media at $kernel_path"
     fi
     
-    if [ ${#found_kernels[@]} -eq 1 ]; then
-        KERNEL_NAME="${found_kernels[0]}"
+    # Lưu tất cả kernel tìm thấy vào biến toàn cục
+    ALL_KERNELS=("${found_kernels[@]}")
+    
+    if [ ${#ALL_KERNELS[@]} -eq 1 ]; then
+        KERNEL_NAME="${ALL_KERNELS[0]}"
         info "Single kernel auto-detected: $KERNEL_NAME"
         
         if [[ "$KERNEL_NAME" == *"lts"* ]]; then
@@ -124,7 +130,7 @@ This kernel will be used for installation." 13 70
         fi
     else
         local kernel_menu=()
-        for kname in "${found_kernels[@]}"; do
+        for kname in "${ALL_KERNELS[@]}"; do
             if [[ "$kname" == *"lts"* ]]; then
                 kernel_menu+=("$kname" "LTS Kernel (will use XFS for root)")
             else
@@ -161,7 +167,17 @@ XFS optimizations:\n\
         fi
     fi
     
-    log "Final kernel selection: $KERNEL_NAME"
+    # Tạo danh sách kernel cần xóa (tất cả kernel trừ kernel được chọn)
+    KERNELS_TO_REMOVE=()
+    for kernel in "${ALL_KERNELS[@]}"; do
+        if [[ "$kernel" != "$KERNEL_NAME" ]]; then
+            KERNELS_TO_REMOVE+=("$kernel")
+        fi
+    done
+    
+    log "Found ${#ALL_KERNELS[@]} kernel(s): ${ALL_KERNELS[*]}"
+    log "Selected kernel: $KERNEL_NAME"
+    log "Kernels to remove: ${KERNELS_TO_REMOVE[*]}"
     log "Root filesystem type: $ROOT_FSTYPE"
 }
 
@@ -933,26 +949,32 @@ mount_and_extract() {
             error "airootfs.sfs not found"
         fi
 
-        log "Copying kernel to rengeos-reborn/kernel..."
-        if [ -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" ]; then
-            cp -f "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-${KERNEL_NAME}" /mnt/recovery/rengeos-reborn/kernel/ \
-                || error "Failed to copy kernel to rengeos-reborn"
-            log "Kernel copied successfully to /rengeos-reborn/kernel/"
+        log "Copying ALL kernels to rengeos-reborn/kernel..."
+        local kernel_path="/run/archiso/bootmnt/arch/boot/x86_64"
+        if [ -d "$kernel_path" ]; then
+            if ! cp -f "$kernel_path"/vmlinuz-* /mnt/recovery/rengeos-reborn/kernel/ 2>/dev/null; then
+                warning "Failed to copy some kernels, but continuing with available ones"
+            fi
+            
+            log "All available kernels copied successfully to /rengeos-reborn/kernel/"
+            log "Kernels copied: $(ls /mnt/recovery/rengeos-reborn/kernel/ 2>/dev/null | wc -l) files"
         else
-            error "Kernel not found for rengeos-reborn"
+            error "Kernel directory not found: $kernel_path"
         fi
 
         log "Verifying rengeos-reborn structure..."
         if [ ! -f "/mnt/recovery/rengeos-reborn/airootfs/airootfs.sfs" ]; then
             error "airootfs.sfs not found in rengeos-reborn"
         fi
-        if [ ! -f "/mnt/recovery/rengeos-reborn/kernel/vmlinuz-${KERNEL_NAME}" ]; then
-            error "Kernel not found in rengeos-reborn"
+        
+        local kernel_count=$(ls /mnt/recovery/rengeos-reborn/kernel/vmlinuz-* 2>/dev/null | wc -l)
+        if [ "$kernel_count" -eq 0 ]; then
+            error "No kernels found in rengeos-reborn/kernel/"
         fi
 
         log "rengeos-reborn directory structure created successfully:"
         log "  - /rengeos-reborn/airootfs/airootfs.sfs"
-        log "  - /rengeos-reborn/kernel/vmlinuz-${KERNEL_NAME}"
+        log "  - /rengeos-reborn/kernel/ ($kernel_count kernel(s))"
 
         log "Recovery partition files prepared (chroot configuration will be done after password input)"
     fi
@@ -1155,6 +1177,7 @@ log() {
 KERNEL_NAME="${RECOVERY_KERNEL}"
 RECOVERY_PART="${RECOVERY_PARTITION}"
 ROOT_PASS="${RECOVERY_ROOT_PASS}"
+KERNELS_TO_REMOVE_STR="${RECOVERY_KERNELS_TO_REMOVE}"
 
 log "Configuring recovery system for emergency boot..."
 
@@ -1166,6 +1189,25 @@ echo "------[RECOVERY MODE!]------" > /etc/motd
 
 log "Cleaning up unnecessary files in recovery..."
 rm -rf /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+
+log "Removing unused kernels from recovery system..."
+if [ -n "$KERNELS_TO_REMOVE_STR" ]; then
+    IFS=' ' read -ra KERNELS_TO_REMOVE <<< "$KERNELS_TO_REMOVE_STR"
+    log "Kernels to remove in recovery: ${KERNELS_TO_REMOVE[*]}"
+    
+    for kernel in "${KERNELS_TO_REMOVE[@]}"; do
+        log "Removing kernel $kernel from recovery system..."
+        if pacman -Q "$kernel" >/dev/null 2>&1; then
+            log "Removing $kernel package from recovery..."
+            pacman -R --noconfirm "$kernel" 2>/dev/null || true
+        fi
+        
+        if pacman -Q "$kernel-headers" >/dev/null 2>&1; then
+            log "Removing $kernel-headers package from recovery..."
+            pacman -R --noconfirm "$kernel-headers" 2>/dev/null || true
+        fi
+    done
+fi
 
 log "Setting up mkinitcpio for recovery..."
 if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
@@ -1227,6 +1269,7 @@ RECOVERY_CHROOT_EOF
             RECOVERY_KERNEL="$KERNEL_NAME" \
             RECOVERY_PARTITION="$RECOVERY_PART" \
             RECOVERY_ROOT_PASS="$root_pass" \
+            RECOVERY_KERNELS_TO_REMOVE="${KERNELS_TO_REMOVE[*]}" \
             chroot /mnt/recovery /setup-recovery.sh 2>&1 | tee -a "$LOG_FILE"; then
             warning "Recovery chroot configuration had issues, but continuing..."
         fi
@@ -1284,6 +1327,7 @@ ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
 RECOVERY_UUID="${SETUP_RECOVERY_UUID}"
 ROOT_FSTYPE="${SETUP_ROOT_FSTYPE}"
+KERNELS_TO_REMOVE_STR="${SETUP_KERNELS_TO_REMOVE}"
 
 log "Setting timezone to $TIMEZONE..."
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
@@ -1305,6 +1349,25 @@ cat > /etc/hosts <<EOF
 ::1 localhost
 127.0.1.1 $HOSTNAME
 EOF
+
+log "Removing unused kernels from main system..."
+if [ -n "$KERNELS_TO_REMOVE_STR" ]; then
+    IFS=' ' read -ra KERNELS_TO_REMOVE <<< "$KERNELS_TO_REMOVE_STR"
+    log "Kernels to remove: ${KERNELS_TO_REMOVE[*]}"
+    
+    for kernel in "${KERNELS_TO_REMOVE[@]}"; do
+        log "Removing kernel $kernel from main system..."
+        if pacman -Q "$kernel" >/dev/null 2>&1; then
+            log "Removing $kernel package..."
+            pacman -R --noconfirm "$kernel" 2>/dev/null || true
+        fi
+        
+        if pacman -Q "$kernel-headers" >/dev/null 2>&1; then
+            log "Removing $kernel-headers package..."
+            pacman -R --noconfirm "$kernel-headers" 2>/dev/null || true
+        fi
+    done
+fi
 
 log "Configuring pacman.conf and enabling multilib repository..."
 if grep -q "^#\[multilib\]" /etc/pacman.conf; then
@@ -1500,6 +1563,7 @@ CHROOT_EOF
         SETUP_ZRAM="$enable_zram" \
         SETUP_RECOVERY_UUID="$recovery_uuid" \
         SETUP_ROOT_FSTYPE="$ROOT_FSTYPE" \
+        SETUP_KERNELS_TO_REMOVE="${KERNELS_TO_REMOVE[*]}" \
         arch-chroot /mnt /setup.sh 2>&1 | tee -a "$LOG_FILE"; then
         error "Failed to configure system"
     fi
