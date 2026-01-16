@@ -1436,4 +1436,229 @@ else
 fi
 
 sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
-sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=5/' /etc/default/gr
+sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=5/' /etc/default/grub
+
+if ! grep -q "GRUB_DISABLE_OS_PROBER" /etc/default/grub; then
+    echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+fi
+
+if [ "$ENABLE_RECOVERY" = "yes" ]; then
+    log "Adding Recovery Mode entry to GRUB..."
+
+    cat > /etc/grub.d/40_custom <<EOF
+#!/bin/sh
+exec tail -n +3 \$0
+# This file provides an easy way to add custom menu entries. Simply type the
+# menu entries you want to add after this comment. Be careful not to change
+# the 'exec tail' line above.
+
+menuentry 'Recovery Mode' {
+    insmod part_gpt
+    insmod part_msdos
+    insmod xfs
+    search --no-floppy --fs-uuid --set=root $RECOVERY_UUID
+    linux /boot/vmlinuz-$KERNEL_NAME root=UUID=$RECOVERY_UUID rootfstype=xfs rw
+    initrd /boot/initramfs-$KERNEL_NAME.img
+}
+EOF
+
+    chmod +x /etc/grub.d/40_custom
+    log "Recovery Mode entry added to GRUB (XFS-based, boots to root shell)"
+fi
+
+log "Generating GRUB configuration..."
+if ! grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tee -a /tmp/grub-mkconfig.log; then
+    log "ERROR: Failed to generate GRUB configuration"
+    exit 1
+fi
+
+log "Configuration completed successfully!"
+CHROOT_EOF
+
+    chmod +x /mnt/setup.sh
+
+    echo "30" ; sleep 1
+    echo "XXX"
+    echo "Executing configuration in chroot..."
+    echo "XXX"
+
+    log "Executing configuration script..."
+    if ! env \
+        ROOT_PASSWORD="$root_pass" \
+        USER_PASSWORD="$user_pass" \
+        SETUP_TIMEZONE="$TIMEZONE" \
+        SETUP_LOCALE="$LOCALE" \
+        SETUP_HOSTNAME="$HOSTNAME" \
+        SETUP_USERNAME="$USERNAME" \
+        SETUP_KERNEL="$KERNEL_NAME" \
+        SETUP_BOOTMODE="$BOOT_MODE" \
+        SETUP_DISK="$DISK" \
+        SETUP_ROOT_PART="$ROOT_PART" \
+        SETUP_BOOT_PART="$BOOT_PART" \
+        SETUP_RECOVERY_PART="$RECOVERY_PART" \
+        SETUP_ENABLE_RECOVERY="$ENABLE_RECOVERY" \
+        SETUP_ZRAM="$enable_zram" \
+        SETUP_RECOVERY_UUID="$recovery_uuid" \
+        SETUP_ROOT_FSTYPE="$ROOT_FSTYPE" \
+        arch-chroot /mnt /setup.sh 2>&1 | tee -a "$LOG_FILE"; then
+        error "Failed to configure system"
+    fi
+
+    rm -f /mnt/setup.sh
+
+    unset root_pass root_pass_confirm user_pass user_pass_confirm
+
+    echo "100"
+    echo "XXX"
+    echo "Configuration completed"
+    echo "XXX"
+    sleep 1
+
+    ) | dialog --title "Step 3/5: System Configuration" --gauge "Configuring system..." 10 70 0
+
+    success "System configuration completed"
+}
+
+finalize_installation() {
+    (
+    echo "10"
+    echo "XXX"
+    echo "Performing final checks..."
+    echo "XXX"
+
+    log "Running final verification..."
+
+    local check_failed=0
+
+    if [ ! -f /mnt/boot/vmlinuz-${KERNEL_NAME} ]; then
+        warning "Kernel missing"
+        check_failed=1
+    fi
+
+    if [ ! -f /mnt/boot/initramfs-${KERNEL_NAME}.img ]; then
+        warning "Initramfs missing"
+        check_failed=1
+    fi
+
+    if [ ! -f /mnt/boot/grub/grub.cfg ]; then
+        warning "GRUB config missing"
+        check_failed=1
+    fi
+
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        if [ ! -f /mnt/recovery/boot/vmlinuz-${KERNEL_NAME} ]; then
+            warning "Recovery kernel missing"
+            check_failed=1
+        fi
+    fi
+
+    if [ $check_failed -eq 1 ]; then
+        error "Final verification failed!"
+    fi
+
+    echo "50"
+    echo "XXX"
+    echo "Unmounting partitions..."
+    echo "XXX"
+
+    log "Syncing filesystems..."
+    sync
+    sleep 3
+
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        log "Unmounting recovery partition..."
+        if mountpoint -q /mnt/recovery; then
+            umount /mnt/recovery || umount -l /mnt/recovery 2>/dev/null || true
+        fi
+    fi
+
+    log "Unmounting boot partition..."
+    if mountpoint -q /mnt/boot; then
+        umount /mnt/boot || umount -l /mnt/boot 2>/dev/null || true
+    fi
+
+    log "Unmounting root partition..."
+    if mountpoint -q /mnt; then
+        umount /mnt || umount -l /mnt 2>/dev/null || true
+    fi
+
+    echo "100"
+    echo "XXX"
+    echo "Installation complete!"
+    echo "XXX"
+    sleep 1
+
+    ) | dialog --title "Step 4/5: Finalization" --gauge "Finalizing..." 10 70 0
+
+    success "Installation completed successfully!"
+}
+
+show_completion_message() {
+    local recovery_info=""
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        recovery_info="\nRecovery Mode: ENABLED\n  - Access via GRUB menu: 'Recovery Mode'\n  - Boots to root shell for emergency rescue"
+    else
+        recovery_info="\nRecovery Mode: Not configured"
+    fi
+
+    local fs_info="Root filesystem: $ROOT_FSTYPE"
+    if [ "$ROOT_FSTYPE" = "xfs" ]; then
+        fs_info="$fs_info (LZ4 optimized)"
+    else
+        fs_info="$fs_info (LZ4 compression)"
+    fi
+
+    dialog --title "Installation Complete!" --msgbox "\
+RengeOS has been successfully installed!\n\n\
+Installation Summary:\n\
+  - Boot Mode: $BOOT_MODE\n\
+  - Disk: $DISK\n\
+  - Hostname: $HOSTNAME\n\
+  - User: $USERNAME\n\
+  - Kernel: $KERNEL_NAME\n\
+  - $fs_info$recovery_info\n\n\
+What's next:\n\
+  1. Remove installation media\n\
+  2. Reboot your system\n\
+  3. Enjoy RengeOS!\n\n\
+Log file: $LOG_FILE\n\n\
+Press OK to finish." 26 70
+}
+
+main() {
+    clear
+
+    echo "========================================" > "$LOG_FILE"
+    echo "RengeOS Installation Log v3.5" >> "$LOG_FILE"
+    echo "========================================" >> "$LOG_FILE"
+    log "Installation started at $(date)"
+
+    if [ "$EUID" -ne 0 ]; then
+        error "This script must be run as root"
+    fi
+
+    check_dependencies
+    detect_boot_mode
+
+    show_welcome || exit 0
+    select_disk
+    configure_boot_size
+    configure_recovery_mode
+    configure_system_settings
+    show_configuration_summary || exit 0
+
+    dialog --title "FINAL WARNING" --defaultno --yesno "\
+This is your LAST CHANCE to cancel!\n\n\
+Disk: $DISK will be COMPLETELY ERASED!\n\n\
+Continue?" 10 50 || exit 0
+
+    partition_disk
+    mount_and_extract
+    configure_system
+    finalize_installation
+    show_completion_message
+}
+
+trap 'error "Script failed at line $LINENO"' ERR
+
+main
