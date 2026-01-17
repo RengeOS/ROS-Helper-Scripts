@@ -450,25 +450,59 @@ Continue with installation?" 28 75 || exit 0
 }
 
 configure_system_settings() {
-    HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
+    # Hostname input
+    while true; do
+        HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
 Enter hostname:\n\n\
 The hostname identifies your computer on a network.\n\
-Use lowercase letters, numbers, and hyphens only." 12 60 "rengeos" 3>&1 1>&2 2>&3) || HOSTNAME="rengeos"
+Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            error "Hostname input cancelled by user"
+        fi
+        
+        # Trim whitespace
+        HOSTNAME=$(echo "${HOSTNAME}" | xargs)
+        
+        if [[ -z "${HOSTNAME}" ]]; then
+            dialog --title "Error" --msgbox "Hostname cannot be empty!\nPlease enter a valid hostname." 8 50
+            continue
+        fi
+        
+        if ! [[ "${HOSTNAME}" =~ ^[a-z0-9-]+$ ]]; then
+            dialog --title "Error" --msgbox "Invalid hostname!\nOnly lowercase letters, numbers, and hyphens are allowed.\n\nPlease enter a valid hostname." 10 60
+            continue
+        fi
+        
+        break
+    done
     
-    if ! [[ "${HOSTNAME}" =~ ^[a-z0-9-]+$ ]]; then
-        warning "Invalid hostname, using default 'rengeos'"
-        HOSTNAME="rengeos"
-    fi
-    
-    USERNAME=$(dialog --title "User Configuration" --inputbox "\
+    # Username input
+    while true; do
+        USERNAME=$(dialog --title "User Configuration" --inputbox "\
 Enter username:\n\n\
 This will be your primary user account.\n\
-Use lowercase letters and numbers only." 12 60 "rengeos" 3>&1 1>&2 2>&3) || USERNAME="rengeos"
-    
-    if ! [[ "${USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-        warning "Invalid username, using default 'rengeos'"
-        USERNAME="rengeos"
-    fi
+Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            error "Username input cancelled by user"
+        fi
+        
+        # Trim whitespace
+        USERNAME=$(echo "${USERNAME}" | xargs)
+        
+        if [[ -z "${USERNAME}" ]]; then
+            dialog --title "Error" --msgbox "Username cannot be empty!\nPlease enter a valid username." 8 50
+            continue
+        fi
+        
+        if ! [[ "${USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            dialog --title "Error" --msgbox "Invalid username!\nMust start with lowercase letter or underscore.\nOnly lowercase letters, numbers, hyphens and underscores are allowed.\n\nPlease enter a valid username." 11 60
+            continue
+        fi
+        
+        break
+    done
     
     select_timezone
     
