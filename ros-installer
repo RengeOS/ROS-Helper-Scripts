@@ -102,7 +102,7 @@ detect_kernel() {
         error "No kernel found in installation media at $kernel_path"
     fi
     
-    # Lưu tất cả kernel tìm thấy vào biến toàn cục
+
     ALL_KERNELS=("${found_kernels[@]}")
     
     if [ ${#ALL_KERNELS[@]} -eq 1 ]; then
@@ -167,7 +167,7 @@ XFS optimizations:\n\
         fi
     fi
     
-    # Tạo danh sách kernel cần xóa (tất cả kernel trừ kernel được chọn)
+    
     KERNELS_TO_REMOVE=()
     for kernel in "${ALL_KERNELS[@]}"; do
         if [[ "$kernel" != "$KERNEL_NAME" ]]; then
@@ -1741,7 +1741,7 @@ main() {
     clear
 
     echo "========================================" > "$LOG_FILE"
-    echo "RengeOS Installation Log v3.5" >> "$LOG_FILE"
+    echo "RengeOS Installation" >> "$LOG_FILE"
     echo "========================================" >> "$LOG_FILE"
     log "Installation started at $(date)"
 

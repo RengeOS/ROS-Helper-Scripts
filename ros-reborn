@@ -23,8 +23,8 @@ KERNEL_NAME=""
 BOOT_MODE=""
 BOOT_FS=""
 ENABLE_RECOVERY="no"
-ROOT_FS="bcachefs"  # Default root filesystem
-OTHER_KERNELS=""    # Các kernel không được chọn
+ROOT_FS="bcachefs"
+OTHER_KERNELS=""
 
 # Logging functions
 log() {
@@ -1051,7 +1051,6 @@ fi
 log "Initramfs generated successfully"
 ls -lh /boot/initramfs-*.img
 
-# Xóa các kernel không được chọn nếu có
 if [[ -n "${OTHER_KERNELS}" ]]; then
     log "Removing unselected kernels: ${OTHER_KERNELS}"
     for kernel in ${OTHER_KERNELS}; do
@@ -1310,7 +1309,7 @@ main() {
     clear
     
     echo "========================================" >"${LOG_FILE}"
-    echo "RengeOS Installation Log v4.0-Refactored" >>"${LOG_FILE}"
+    echo "RengeOS Reborn On Recovery Mode" >>"${LOG_FILE}"
     echo "========================================" >>"${LOG_FILE}"
     log "Installation started at $(date)"
     
