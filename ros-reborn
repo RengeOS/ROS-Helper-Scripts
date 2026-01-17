@@ -160,7 +160,7 @@ Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_options[@]}" 3>
             warning "No kernel selected, using first: ${KERNEL_NAME}"
         fi
         
-        # Lưu các kernel không được chọn
+ 
         OTHER_KERNELS=""
         for kname in "${found_kernels[@]}"; do
             if [[ "${kname}" != "${KERNEL_NAME}" ]]; then
