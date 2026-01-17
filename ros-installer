@@ -1477,6 +1477,11 @@ if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
     exit 1
 fi
 
+
+log "Removing installer scripts if present in main system..."
+rm -f /usr/local/bin/ros-installer
+rm -f /usr/local/bin/ros-reborn
+
 if [ "$ENABLE_ZRAM" = "yes" ]; then
     log "Configuring Zram..."
     

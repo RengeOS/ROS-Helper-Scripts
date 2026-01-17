@@ -1076,6 +1076,10 @@ ZRAM_EOF
     log "Zram configuration completed"
 fi
 
+log "Removing installer scripts if present in main system..."
+rm -f /usr/local/bin/ros-installer
+rm -f /usr/local/bin/ros-reborn
+
 log "Installing GRUB bootloader for ${BOOT_MODE} mode..."
 
 if ! mountpoint -q /boot; then
