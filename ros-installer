@@ -354,16 +354,6 @@ WARNING: ALL DATA WILL BE ERASED!" 20 70 10 "${disks[@]}" 3>&1 1>&2 2>&3) || exi
     DISK="/dev/$DISK"
     log "User selected disk: $DISK"
     
-    if [[ "$DISK" == *"nvme"* ]] || [[ "$DISK" == *"mmcblk"* ]]; then
-        BOOT_PART="${DISK}p1"
-        RECOVERY_PART="${DISK}p2"
-        ROOT_PART="${DISK}p3"
-    else
-        BOOT_PART="${DISK}1"
-        RECOVERY_PART="${DISK}2"
-        ROOT_PART="${DISK}3"
-    fi
-    
     local disk_info=$(lsblk "$DISK" -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "Disk information unavailable")
     
     dialog --title "Disk Information" --yesno "\
@@ -372,6 +362,35 @@ Boot mode: $BOOT_MODE\n\n\
 Current layout:\n\
 $disk_info\n\n\
 WARNING: Continue with installation?" 18 70 || exit 0
+}
+
+assign_partition_vars() {
+    if [[ "$DISK" == *"nvme"* ]] || [[ "$DISK" == *"mmcblk"* ]]; then
+        if [ "$ENABLE_RECOVERY" = "yes" ]; then
+            BOOT_PART="${DISK}p1"
+            RECOVERY_PART="${DISK}p2"
+            ROOT_PART="${DISK}p3"
+        else
+            BOOT_PART="${DISK}p1"
+            ROOT_PART="${DISK}p2"
+        fi
+    else
+        if [ "$ENABLE_RECOVERY" = "yes" ]; then
+            BOOT_PART="${DISK}1"
+            RECOVERY_PART="${DISK}2"
+            ROOT_PART="${DISK}3"
+        else
+            BOOT_PART="${DISK}1"
+            ROOT_PART="${DISK}2"
+        fi
+    fi
+    
+    log "Assigned partition variables:"
+    log "  BOOT_PART: $BOOT_PART"
+    log "  ROOT_PART: $ROOT_PART"
+    if [ "$ENABLE_RECOVERY" = "yes" ]; then
+        log "  RECOVERY_PART: $RECOVERY_PART"
+    fi
 }
 
 configure_recovery_mode() {
@@ -450,6 +469,7 @@ Press OK to try again." 20 60
         log "Recovery partition size configured: $RECOVERY_SIZE"
     else
         ENABLE_RECOVERY="no"
+        RECOVERY_PART=""
         log "User chose to skip Recovery Mode configuration"
     fi
 }
@@ -481,25 +501,53 @@ Format: 512M, 1G, 2G, etc." 20 70 "1G" 3>&1 1>&2 2>&3) || BOOT_SIZE="1G"
 }
 
 configure_system_settings() {
-    HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
+    # Hostname configuration with validation
+    while true; do
+        HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
 Enter hostname:\n\n\
 The hostname identifies your computer on a network.\n\
-Use lowercase letters, numbers, and hyphens only." 12 60 "rengeos" 3>&1 1>&2 2>&3) || HOSTNAME="rengeos"
+Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            error "Hostname input cancelled"
+        fi
+        
+        if [ -z "$HOSTNAME" ]; then
+            dialog --title "Error" --msgbox "Hostname cannot be empty!\n\nPlease enter a valid hostname." 8 50
+            continue
+        fi
+        
+        if ! [[ "$HOSTNAME" =~ ^[a-z0-9-]+$ ]]; then
+            dialog --title "Error" --msgbox "Invalid hostname format!\n\nOnly lowercase letters, numbers, and hyphens are allowed.\n\nExamples: my-pc, rengeos-01, server-2023" 11 60
+            continue
+        fi
+        
+        break
+    done
     
-    if ! [[ "$HOSTNAME" =~ ^[a-z0-9-]+$ ]]; then
-        warning "Invalid hostname, using default 'rengeos'"
-        HOSTNAME="rengeos"
-    fi
-    
-    USERNAME=$(dialog --title "User Configuration" --inputbox "\
+    # Username configuration with validation
+    while true; do
+        USERNAME=$(dialog --title "User Configuration" --inputbox "\
 Enter username:\n\n\
 This will be your primary user account.\n\
-Use lowercase letters and numbers only." 12 60 "rengeos" 3>&1 1>&2 2>&3) || USERNAME="rengeos"
-    
-    if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-        warning "Invalid username, using default 'rengeos'"
-        USERNAME="rengeos"
-    fi
+Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            error "Username input cancelled"
+        fi
+        
+        if [ -z "$USERNAME" ]; then
+            dialog --title "Error" --msgbox "Username cannot be empty!\n\nPlease enter a valid username." 8 50
+            continue
+        fi
+        
+        if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            dialog --title "Error" --msgbox "Invalid username format!\n\nUsername must start with a lowercase letter or underscore,\nand can only contain lowercase letters, numbers, hyphens, and underscores.\n\nExamples: john, user_01, admin_user" 12 60
+            continue
+        fi
+        
+        break
+    done
     
     select_timezone
     
@@ -1708,6 +1756,7 @@ main() {
     select_disk
     configure_boot_size
     configure_recovery_mode
+    assign_partition_vars
     configure_system_settings
     show_configuration_summary || exit 0
 
