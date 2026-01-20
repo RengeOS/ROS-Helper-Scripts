@@ -848,7 +848,7 @@ configure_system() {
     local root_pass root_pass_confirm user_pass user_pass_confirm enable_zram
     
     while true; do
-        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for both main system)" 12 60 3>&1 1>&2 2>&3)
+        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for only main system)" 12 60 3>&1 1>&2 2>&3)
         
         if [[ $? -ne 0 ]]; then
             warning "User cancelled root password input"
@@ -1083,7 +1083,7 @@ rm -f /usr/local/bin/ros-reborn
 if [[ "${ROOT_FS}" == "bcachefs" ]]; then
     log "Creating Bcachefs snapshots subvolume..."
     if bcachefs subvolume create /.snapshots; then
-        log "Bcachefs .snapshots subvolume created successfully"
+        log "Bcachefs .snapshots subvolume created successfully at /"
     else
         log "WARNING: Failed to create .snapshots subvolume"
     fi
