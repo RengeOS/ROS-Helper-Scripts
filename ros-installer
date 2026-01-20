@@ -1482,6 +1482,15 @@ log "Removing installer scripts if present in main system..."
 rm -f /usr/local/bin/ros-installer
 rm -f /usr/local/bin/ros-reborn
 
+if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+    log "Creating Bcachefs snapshots subvolume..."
+    if bcachefs subvolume create /.snapshots; then
+        log "Bcachefs .snapshots subvolume created successfully at /"
+    else
+        log "WARNING: Failed to create .snapshots subvolume"
+    fi
+fi
+
 if [ "$ENABLE_ZRAM" = "yes" ]; then
     log "Configuring Zram..."
     

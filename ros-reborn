@@ -1080,6 +1080,15 @@ log "Removing installer scripts if present in main system..."
 rm -f /usr/local/bin/ros-installer
 rm -f /usr/local/bin/ros-reborn
 
+if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+    log "Creating Bcachefs snapshots subvolume..."
+    if bcachefs subvolume create /.snapshots; then
+        log "Bcachefs .snapshots subvolume created successfully"
+    else
+        log "WARNING: Failed to create .snapshots subvolume"
+    fi
+fi
+
 log "Installing GRUB bootloader for ${BOOT_MODE} mode..."
 
 if ! mountpoint -q /boot; then
