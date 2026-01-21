@@ -318,7 +318,6 @@ Performance OPTIMIZATIONS:\n\
   - LZ4 compression (fast, ~60% compression ratio)\n\
   - NoAtime mount (reduced disk I/O)\n\
   - TRIM/Discard for SSD performance\n\
-  - CPU mitigations OFF (more FPS, less security)\n\
   - Transparent hugepages optimized\n\
   - Split lock detection disabled\n\n\
 NEW: Recovery Mode for system rescue!\n\n\
@@ -1555,9 +1554,9 @@ fi
 ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 
 if [[ "$DISK" == *"nvme"* ]]; then
-    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise"
 else
-    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off mitigations=off transparent_hugepage=madvise"
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise"
 fi
 
 sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
