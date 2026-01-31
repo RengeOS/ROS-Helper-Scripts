@@ -25,6 +25,9 @@ BOOT_FS=""
 ENABLE_RECOVERY="no"
 ROOT_FS="bcachefs"
 OTHER_KERNELS=""
+ROOT_PASSWORD=""
+USER_PASSWORD=""
+ENABLE_ZRAM="no"
 
 # Logging functions
 log() {
@@ -156,18 +159,16 @@ Select the kernel you want to install:\n\n\
 Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_options[@]}" 3>&1 1>&2 2>&3)
         
         if [[ $? -ne 0 ]] || [[ -z "${KERNEL_NAME}" ]]; then
-            KERNEL_NAME="${found_kernels[0]}"
-            warning "No kernel selected, using first: ${KERNEL_NAME}"
+            exit 0
         fi
-        
- 
+
         OTHER_KERNELS=""
         for kname in "${found_kernels[@]}"; do
             if [[ "${kname}" != "${KERNEL_NAME}" ]]; then
                 OTHER_KERNELS+="${kname} "
             fi
         done
-        OTHER_KERNELS=$(echo "${OTHER_KERNELS}" | xargs)  # Xóa khoảng trắng thừa
+        OTHER_KERNELS=$(echo "${OTHER_KERNELS}" | xargs)
         log "Kernels to remove: ${OTHER_KERNELS}"
     else
         KERNEL_NAME="${found_kernels[0]}"
@@ -176,12 +177,10 @@ Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_options[@]}" 3>
     
     info "Selected kernel: ${KERNEL_NAME}"
     
-    # Check if kernel is LTS and set root filesystem
     if [[ "${KERNEL_NAME}" == *"lts"* ]] || [[ "${KERNEL_NAME}" == *"LTS"* ]]; then
         ROOT_FS="xfs"
         log "Kernel LTS detected, will use XFS for root partition"
     else
-        # For non-LTS kernels, let user choose between bcachefs and xfs
         local fs_choice
         fs_choice=$(dialog --title "Root Filesystem Selection" --menu "\
 Kernel selected: ${KERNEL_NAME}\n\n\
@@ -200,11 +199,10 @@ Which filesystem do you want for root?" 22 70 2 \
             3>&1 1>&2 2>&3)
         
         if [[ $? -ne 0 ]]; then
-            ROOT_FS="bcachefs"
-            warning "User cancelled, using default Bcachefs"
-        else
-            ROOT_FS="${fs_choice}"
+            exit 0
         fi
+        
+        ROOT_FS="${fs_choice}"
     fi
     
     dialog --title "Kernel Detection" --msgbox "\
@@ -254,8 +252,7 @@ Select your continent/region:\n\n\
 Use arrow keys to navigate, Enter to select." 20 60 12 "${regions[@]}" 3>&1 1>&2 2>&3)
     
     if [[ $? -ne 0 ]]; then
-        TIMEZONE="UTC"
-        return
+        exit 0
     fi
     
     if [[ -d "${zoneinfo_path}/${selected_region}" ]]; then
@@ -282,7 +279,7 @@ Select your city/timezone:\n\n\
 Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 2>&3)
         
         if [[ $? -ne 0 ]]; then
-            TIMEZONE="${selected_region}/$(echo "${city_list}" | head -n1)"
+            exit 0
         else
             TIMEZONE="${selected_region}/${selected_city}"
         fi
@@ -448,8 +445,26 @@ WARNING: Boot and Root partitions will be FORMATTED!\n\
 Continue with installation?" 28 75 || exit 0
 }
 
-configure_system_settings() {
-    # Hostname input
+configure_system_locale() {
+    select_timezone
+    
+    local locales=(
+        "en_US.UTF-8" "English (US)"
+        "en_GB.UTF-8" "English (UK)"
+        "vi_VN.UTF-8" "Vietnamese"
+        "ja_JP.UTF-8" "Japanese"
+        "zh_CN.UTF-8" "Chinese (Simplified)"
+    )
+    
+    LOCALE=$(dialog --title "Locale Selection" --menu "\
+Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3)
+    
+    if [[ $? -ne 0 ]]; then
+        exit 0
+    fi
+}
+
+configure_user_settings() {
     while true; do
         HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
 Enter hostname:\n\n\
@@ -457,10 +472,9 @@ The hostname identifies your computer on a network.\n\
 Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
         
         if [[ $? -ne 0 ]]; then
-            error "Hostname input cancelled by user"
+            exit 0
         fi
         
-        # Trim whitespace
         HOSTNAME=$(echo "${HOSTNAME}" | xargs)
         
         if [[ -z "${HOSTNAME}" ]]; then
@@ -476,7 +490,6 @@ Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
         break
     done
     
-    # Username input
     while true; do
         USERNAME=$(dialog --title "User Configuration" --inputbox "\
 Enter username:\n\n\
@@ -484,10 +497,9 @@ This will be your primary user account.\n\
 Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
         
         if [[ $? -ne 0 ]]; then
-            error "Username input cancelled by user"
+            exit 0
         fi
         
-        # Trim whitespace
         USERNAME=$(echo "${USERNAME}" | xargs)
         
         if [[ -z "${USERNAME}" ]]; then
@@ -503,21 +515,80 @@ Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
         break
     done
     
-    select_timezone
+    while true; do
+        local root_pass
+        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for only main system)" 12 60 3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            exit 0
+        fi
+        
+        if [[ -z "${root_pass}" ]]; then
+            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+            continue
+        fi
+        
+        local root_pass_confirm
+        root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            exit 0
+        fi
+        
+        if [[ "${root_pass}" == "${root_pass_confirm}" ]]; then
+            ROOT_PASSWORD="${root_pass}"
+            break
+        else
+            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+        fi
+    done
     
-    local locales=(
-        "en_US.UTF-8" "English (US)"
-        "en_GB.UTF-8" "English (UK)"
-        "vi_VN.UTF-8" "Vietnamese"
-        "ja_JP.UTF-8" "Japanese"
-        "zh_CN.UTF-8" "Chinese (Simplified)"
-    )
-    
-    LOCALE=$(dialog --title "Locale Selection" --menu "\
-Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3) || LOCALE="en_US.UTF-8"
-    
-    log "Auto-detecting kernel from installation media..."
-    detect_kernel
+    while true; do
+        local user_pass
+        user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '${USERNAME}':" 10 60 3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            exit 0
+        fi
+        
+        if [[ -z "${user_pass}" ]]; then
+            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+            continue
+        fi
+        
+        local user_pass_confirm
+        user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
+        
+        if [[ $? -ne 0 ]]; then
+            exit 0
+        fi
+        
+        if [[ "${user_pass}" == "${user_pass_confirm}" ]]; then
+            USER_PASSWORD="${user_pass}"
+            break
+        else
+            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+        fi
+    done
+}
+
+configure_zram() {
+    log "Prompting user for Zram configuration..."
+    if dialog --title "Zram Configuration" --yesno "\
+Do you want to enable Zram for swap compression?\n\n\
+What is Zram?\n\
+  - Compressed swap in RAM (faster than disk)\n\
+  - Uses RAM / 2 for swap space\n\
+  - LZ4 compression algorithm (fast)\n\
+  - Reduces disk wear on SSD/HDD\n\n\
+Recommended: YES for systems with 4GB+ RAM\n\n\
+Enable Zram now?" 16 60; then
+        ENABLE_ZRAM="yes"
+        log "User chose to enable Zram"
+    else
+        ENABLE_ZRAM="no"
+        log "User chose to skip Zram configuration"
+    fi
 }
 
 show_configuration_summary() {
@@ -531,6 +602,11 @@ show_configuration_summary() {
     local recovery_status="Not selected"
     if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
         recovery_status="Enabled: ${RECOVERY_PART}"
+    fi
+    
+    local zram_status="Disabled"
+    if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
+        zram_status="Enabled (RAM/2, LZ4)"
     fi
     
     local other_kernels_info=""
@@ -551,10 +627,15 @@ SYSTEM CONFIGURATION:\n\
   Username: ${USERNAME}\n\
   Timezone: ${TIMEZONE}\n\
   Locale:   ${LOCALE}\n\
-  Kernel:   ${KERNEL_NAME} (auto-detected)${other_kernels_info}\n\n\
+  Kernel:   ${KERNEL_NAME} (auto-detected)${other_kernels_info}\n\
+  Zram:     ${zram_status}\n\n\
 WARNING: Selected partitions will be FORMATTED!\n\
          ALL DATA will be LOST!\n\n\
-Continue with installation?" 24 70
+Continue with installation?" 25 70
+    
+    if [[ $? -ne 0 ]]; then
+        exit 0
+    fi
 }
 
 format_partitions() {
@@ -591,7 +672,6 @@ format_partitions() {
 
     log "Formatting ${ROOT_PART} with ${ROOT_FS}..."
 
-    # Wipe partition signature
     wipefs -af "${ROOT_PART}" >/dev/null 2>&1 || {
         log "Warning: Could not wipe signatures from ${ROOT_PART}, continuing anyway..."
     }
@@ -637,7 +717,6 @@ format_partitions() {
 
     log "Formatting ${BOOT_PART} as ${BOOT_FS}..."
     
-    # Wipe partition signature
     wipefs -af "${BOOT_PART}" >/dev/null 2>&1 || {
         log "Warning: Could not wipe signatures from ${BOOT_PART}, continuing anyway..."
     }
@@ -844,79 +923,6 @@ FSTAB_EOF
 }
 
 configure_system() {
-    local root_pass root_pass_confirm user_pass user_pass_confirm enable_zram
-    
-    while true; do
-        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for only main system)" 12 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            warning "User cancelled root password input"
-            exit 0
-        fi
-        
-        if [[ -z "${root_pass}" ]]; then
-            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
-            continue
-        fi
-        
-        root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            warning "User cancelled root password confirmation"
-            exit 0
-        fi
-        
-        if [[ "${root_pass}" == "${root_pass_confirm}" ]]; then
-            break
-        else
-            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
-        fi
-    done
-    
-    while true; do
-        user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '${USERNAME}':" 10 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            warning "User cancelled user password input"
-            exit 0
-        fi
-        
-        if [[ -z "${user_pass}" ]]; then
-            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
-            continue
-        fi
-        
-        user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            warning "User cancelled user password confirmation"
-            exit 0
-        fi
-        
-        if [[ "${user_pass}" == "${user_pass_confirm}" ]]; then
-            break
-        else
-            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
-        fi
-    done
-    
-    log "Prompting user for Zram configuration..."
-    if dialog --title "Zram Configuration" --yesno "\
-Do you want to enable Zram for swap compression?\n\n\
-What is Zram?\n\
-  - Compressed swap in RAM (faster than disk)\n\
-  - Uses RAM / 2 for swap space\n\
-  - LZ4 compression algorithm (fast)\n\
-  - Reduces disk wear on SSD/HDD\n\n\
-Recommended: YES for systems with 4GB+ RAM\n\n\
-Enable Zram now?" 16 60; then
-        enable_zram="yes"
-        log "User chose to enable Zram"
-    else
-        enable_zram="no"
-        log "User chose to skip Zram configuration"
-    fi
-    
     (
     echo "10"
     echo "XXX"
@@ -1003,7 +1009,6 @@ fi
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
 
 log "Cleaning up duplicate kernel presets..."
-# Remove all preset files first
 rm -f /etc/mkinitcpio.d/*.preset 2>/dev/null || true
 
 log "Creating kernel preset for ${KERNEL_NAME}..."
@@ -1054,7 +1059,6 @@ if [[ -n "${OTHER_KERNELS}" ]]; then
     log "Removing unselected kernels: ${OTHER_KERNELS}"
     for kernel in ${OTHER_KERNELS}; do
         log "Removing kernel: ${kernel} and its headers"
-        # Xóa kernel package và headers package
         pacman -R --noconfirm "${kernel}" "${kernel}-headers" 2>/dev/null || {
             log "Warning: Failed to remove kernel ${kernel} or it was not installed"
         }
@@ -1075,9 +1079,8 @@ ZRAM_EOF
     log "Zram configuration completed"
 fi
 
-log "Removing installer scripts if present in main system..."
-rm -f /usr/local/bin/ros-installer
-rm -f /usr/local/bin/ros-reborn
+log "Removing ROS-Helper-Scripts package if present in main system..."
+pacman -R --noconfirm ros-helper-scripts
 
 if [[ "${ROOT_FS}" == "bcachefs" ]]; then
     log "Creating Bcachefs snapshots subvolume..."
@@ -1193,8 +1196,8 @@ CHROOT_EOF
     
     log "Executing configuration script..."
     if ! env \
-        ROOT_PASSWORD="${root_pass}" \
-        USER_PASSWORD="${user_pass}" \
+        ROOT_PASSWORD="${ROOT_PASSWORD}" \
+        USER_PASSWORD="${USER_PASSWORD}" \
         SETUP_TIMEZONE="${TIMEZONE}" \
         SETUP_LOCALE="${LOCALE}" \
         SETUP_HOSTNAME="${HOSTNAME}" \
@@ -1206,7 +1209,7 @@ CHROOT_EOF
         SETUP_BOOT_PART="${BOOT_PART}" \
         SETUP_RECOVERY_PART="${RECOVERY_PART}" \
         SETUP_ENABLE_RECOVERY="${ENABLE_RECOVERY}" \
-        SETUP_ZRAM="${enable_zram}" \
+        SETUP_ZRAM="${ENABLE_ZRAM}" \
         SETUP_ROOT_FS="${ROOT_FS}" \
         OTHER_KERNELS="${OTHER_KERNELS}" \
         arch-chroot /mnt /setup.sh 2>&1 | tee -a "${LOG_FILE}"; then
@@ -1215,7 +1218,7 @@ CHROOT_EOF
     
     rm -f /mnt/setup.sh
     
-    unset root_pass root_pass_confirm user_pass user_pass_confirm
+    unset ROOT_PASSWORD USER_PASSWORD
     
     echo "100"
     echo "XXX"
@@ -1295,6 +1298,11 @@ show_completion_message() {
         recovery_info="\n  - Recovery: ${RECOVERY_PART} (registered in GRUB)"
     fi
     
+    local zram_info=""
+    if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
+        zram_info="\n  - Zram: Enabled (RAM/2, LZ4 compression)"
+    fi
+    
     local other_kernels_info=""
     if [[ -n "${OTHER_KERNELS}" ]]; then
         other_kernels_info="\n  - Other kernels removed: ${OTHER_KERNELS}"
@@ -1308,7 +1316,7 @@ Installation Summary:\n\
   - Root: ${ROOT_PART} (${ROOT_FS})${recovery_info}\n\
   - Hostname: ${HOSTNAME}\n\
   - User: ${USERNAME}\n\
-  - Kernel: ${KERNEL_NAME} (installed)${other_kernels_info}\n\n\
+  - Kernel: ${KERNEL_NAME} (installed)${other_kernels_info}${zram_info}\n\n\
 What's next:\n\
   1. Remove installation media\n\
   2. Reboot your system\n\
@@ -1334,8 +1342,11 @@ main() {
     show_welcome || exit 0
     select_boot_mode
     select_partitions
-    configure_system_settings
-    show_configuration_summary || exit 0
+    configure_system_locale
+    configure_user_settings
+    detect_kernel
+    configure_zram
+    show_configuration_summary
     
     dialog --title "FINAL WARNING" --defaultno --yesno "\
 This is your LAST CHANCE to cancel!\n\n\

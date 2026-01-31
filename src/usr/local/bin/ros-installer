@@ -26,6 +26,9 @@ ENABLE_RECOVERY="no"
 ROOT_FSTYPE="bcachefs"
 ALL_KERNELS=()
 KERNELS_TO_REMOVE=()
+ROOT_PASSWORD=""
+USER_PASSWORD=""
+ENABLE_ZRAM="no"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -102,7 +105,6 @@ detect_kernel() {
         error "No kernel found in installation media at $kernel_path"
     fi
     
-
     ALL_KERNELS=("${found_kernels[@]}")
     
     if [ ${#ALL_KERNELS[@]} -eq 1 ]; then
@@ -167,7 +169,6 @@ XFS optimizations:\n\
         fi
     fi
     
-    
     KERNELS_TO_REMOVE=()
     for kernel in "${ALL_KERNELS[@]}"; do
         if [[ "$kernel" != "$KERNEL_NAME" ]]; then
@@ -211,6 +212,25 @@ Choose the filesystem for your root partition:" 15 70 2 \
     fi
 }
 
+configure_zram() {
+    log "Prompting user for Zram configuration..."
+    if dialog --title "Zram Configuration" --yesno "\
+Do you want to enable Zram for swap compression?\n\n\
+What is Zram?\n\
+  - Compressed swap in RAM (faster than disk)\n\
+  - Uses RAM / 2 for swap space\n\
+  - LZ4 compression algorithm (fast)\n\
+  - Reduces disk wear on SSD/HDD\n\n\
+Recommended: YES for systems with 4GB+ RAM\n\n\
+Enable Zram now?" 16 60; then
+        ENABLE_ZRAM="yes"
+        log "User chose to enable Zram"
+    else
+        ENABLE_ZRAM="no"
+        log "User chose to skip Zram configuration"
+    fi
+}
+
 select_timezone() {
     local zoneinfo_path="/usr/share/zoneinfo"
     
@@ -248,8 +268,7 @@ Select your continent/region:\n\n\
 Use arrow keys to navigate, Enter to select." 20 60 12 "${regions[@]}" 3>&1 1>&2 2>&3)
     
     if [ $? -ne 0 ]; then
-        TIMEZONE="UTC"
-        return
+        exit 0
     fi
     
     if [ -d "$zoneinfo_path/$selected_region" ]; then
@@ -275,10 +294,10 @@ Select your city/timezone:\n\n\
 Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 2>&3)
         
         if [ $? -ne 0 ]; then
-            TIMEZONE="$selected_region/$(echo "$city_list" | head -n1)"
-        else
-            TIMEZONE="$selected_region/$selected_city"
+            exit 0
         fi
+        
+        TIMEZONE="$selected_region/$selected_city"
     else
         TIMEZONE="$selected_region"
     fi
@@ -289,6 +308,129 @@ Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 
     else
         info "Selected timezone: $TIMEZONE"
     fi
+}
+
+select_locale() {
+    local locales=(
+        "en_US.UTF-8" "English (US)"
+        "en_GB.UTF-8" "English (UK)"
+        "vi_VN.UTF-8" "Vietnamese"
+        "ja_JP.UTF-8" "Japanese"
+        "zh_CN.UTF-8" "Chinese (Simplified)"
+    )
+    
+    LOCALE=$(dialog --title "Locale Selection" --menu "\
+Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3)
+    
+    if [ $? -ne 0 ]; then
+        exit 0
+    fi
+    
+    log "Selected locale: $LOCALE"
+}
+
+set_hostname() {
+    while true; do
+        HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
+Enter hostname:\n\n\
+The hostname identifies your computer on a network.\n\
+Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        
+        if [ -z "$HOSTNAME" ]; then
+            dialog --title "Error" --msgbox "Hostname cannot be empty!\n\nPlease enter a valid hostname." 8 50
+            continue
+        fi
+        
+        if ! [[ "$HOSTNAME" =~ ^[a-z0-9-]+$ ]]; then
+            dialog --title "Error" --msgbox "Invalid hostname format!\n\nOnly lowercase letters, numbers, and hyphens are allowed.\n\nExamples: my-pc, rengeos-01, server-2023" 11 60
+            continue
+        fi
+        
+        break
+    done
+}
+
+set_username() {
+    while true; do
+        USERNAME=$(dialog --title "User Configuration" --inputbox "\
+Enter username:\n\n\
+This will be your primary user account.\n\
+Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        
+        if [ -z "$USERNAME" ]; then
+            dialog --title "Error" --msgbox "Username cannot be empty!\n\nPlease enter a valid username." 8 50
+            continue
+        fi
+        
+        if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            dialog --title "Error" --msgbox "Invalid username format!\n\nUsername must start with a lowercase letter or underscore,\nand can only contain lowercase letters, numbers, hyphens, and underscores.\n\nExamples: john, user_01, admin_user" 12 60
+            continue
+        fi
+        
+        break
+    done
+}
+
+set_passwords() {
+    while true; do
+        local root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for both main system and recovery partition)" 12 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        
+        if [ -z "$root_pass" ]; then
+            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+            continue
+        fi
+        
+        local root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        
+        if [ "$root_pass" = "$root_pass_confirm" ]; then
+            ROOT_PASSWORD="$root_pass"
+            break
+        else
+            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+        fi
+    done
+    
+    while true; do
+        local user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '$USERNAME':" 10 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        
+        if [ -z "$user_pass" ]; then
+            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+            continue
+        fi
+        
+        local user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        
+        if [ "$user_pass" = "$user_pass_confirm" ]; then
+            USER_PASSWORD="$user_pass"
+            break
+        else
+            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+        fi
+    done
 }
 
 show_welcome() {
@@ -499,72 +641,6 @@ Format: 512M, 1G, 2G, etc." 20 70 "1G" 3>&1 1>&2 2>&3) || BOOT_SIZE="1G"
     log "Boot partition size configured: $BOOT_SIZE ($BOOT_FS) for $BOOT_MODE mode"
 }
 
-configure_system_settings() {
-    # Hostname configuration with validation
-    while true; do
-        HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
-Enter hostname:\n\n\
-The hostname identifies your computer on a network.\n\
-Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
-            error "Hostname input cancelled"
-        fi
-        
-        if [ -z "$HOSTNAME" ]; then
-            dialog --title "Error" --msgbox "Hostname cannot be empty!\n\nPlease enter a valid hostname." 8 50
-            continue
-        fi
-        
-        if ! [[ "$HOSTNAME" =~ ^[a-z0-9-]+$ ]]; then
-            dialog --title "Error" --msgbox "Invalid hostname format!\n\nOnly lowercase letters, numbers, and hyphens are allowed.\n\nExamples: my-pc, rengeos-01, server-2023" 11 60
-            continue
-        fi
-        
-        break
-    done
-    
-    # Username configuration with validation
-    while true; do
-        USERNAME=$(dialog --title "User Configuration" --inputbox "\
-Enter username:\n\n\
-This will be your primary user account.\n\
-Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
-            error "Username input cancelled"
-        fi
-        
-        if [ -z "$USERNAME" ]; then
-            dialog --title "Error" --msgbox "Username cannot be empty!\n\nPlease enter a valid username." 8 50
-            continue
-        fi
-        
-        if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-            dialog --title "Error" --msgbox "Invalid username format!\n\nUsername must start with a lowercase letter or underscore,\nand can only contain lowercase letters, numbers, hyphens, and underscores.\n\nExamples: john, user_01, admin_user" 12 60
-            continue
-        fi
-        
-        break
-    done
-    
-    select_timezone
-    
-    local locales=(
-        "en_US.UTF-8" "English (US)"
-        "en_GB.UTF-8" "English (UK)"
-        "vi_VN.UTF-8" "Vietnamese"
-        "ja_JP.UTF-8" "Japanese"
-        "zh_CN.UTF-8" "Chinese (Simplified)"
-    )
-    
-    LOCALE=$(dialog --title "Locale Selection" --menu "\
-Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3) || LOCALE="en_US.UTF-8"
-    
-    log "Auto-detecting kernel from installation media..."
-    detect_kernel
-}
-
 show_configuration_summary() {
     local boot_fs_display=""
     if [ "$BOOT_MODE" = "UEFI" ]; then
@@ -578,6 +654,11 @@ show_configuration_summary() {
         root_fs_display="XFS (LZ4 optimized)"
     else
         root_fs_display="Bcachefs (LZ4 compression)"
+    fi
+    
+    local zram_status="Disabled"
+    if [ "$ENABLE_ZRAM" = "yes" ]; then
+        zram_status="Enabled (RAM/2, LZ4)"
     fi
     
     local partition_layout="  Boot: $BOOT_PART ($boot_fs_display, $BOOT_SIZE)"
@@ -602,6 +683,7 @@ DISK CONFIGURATION:\n\
     - Boot: $boot_fs_display (optimized for $BOOT_MODE)\n\
     - Root: $root_fs_display\n\
     - Recovery: $recovery_status (XFS, GRUB-compatible)\n\
+  Zram: $zram_status\n\
 $partition_layout\n\n\
 SYSTEM CONFIGURATION:\n\
   Hostname: $HOSTNAME\n\
@@ -610,7 +692,7 @@ SYSTEM CONFIGURATION:\n\
   Locale:   $LOCALE\n\
   Kernel:   $KERNEL_NAME\n\n\
 WARNING: ALL DATA on $DISK will be ERASED!\n\n\
-Continue with installation?" 28 70
+Continue with installation?" 30 70
 }
 
 partition_disk() {
@@ -1114,87 +1196,14 @@ FSTAB_EOF
 }
 
 configure_system() {
-    local root_pass=""
-    local root_pass_confirm=""
-    local user_pass=""
-    local user_pass_confirm=""
-    local enable_zram="no"
+    local root_pass="$ROOT_PASSWORD"
+    local user_pass="$USER_PASSWORD"
+    local enable_zram="$ENABLE_ZRAM"
     local recovery_uuid=""
     
     if [ "$ENABLE_RECOVERY" = "yes" ]; then
         recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
         log "Recovery partition UUID: $recovery_uuid"
-    fi
-    
-    while true; do
-        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for both main system and recovery partition)" 12 60 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
-            warning "User cancelled root password input"
-            exit 0
-        fi
-        
-        if [ -z "$root_pass" ]; then
-            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
-            continue
-        fi
-        
-        root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
-            warning "User cancelled root password confirmation"
-            exit 0
-        fi
-        
-        if [ "$root_pass" = "$root_pass_confirm" ]; then
-            break
-        else
-            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
-        fi
-    done
-    
-    while true; do
-        user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '$USERNAME':" 10 60 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
-            warning "User cancelled user password input"
-            exit 0
-        fi
-        
-        if [ -z "$user_pass" ]; then
-            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
-            continue
-        fi
-        
-        user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
-            warning "User cancelled user password confirmation"
-            exit 0
-        fi
-        
-        if [ "$user_pass" = "$user_pass_confirm" ]; then
-            break
-        else
-            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
-        fi
-    done
-    
-    log "Prompting user for Zram configuration..."
-    if dialog --title "Zram Configuration" --yesno "\
-Do you want to enable Zram for swap compression?\n\n\
-What is Zram?\n\
-  - Compressed swap in RAM (faster than disk)\n\
-  - Uses RAM / 2 for swap space\n\
-  - LZ4 compression algorithm (fast)\n\
-  - Reduces disk wear on SSD/HDD\n\n\
-Recommended: YES for systems with 4GB+ RAM\n\n\
-Enable Zram now?" 16 60; then
-        enable_zram="yes"
-        log "User chose to enable Zram"
-    else
-        enable_zram="no"
-        log "User chose to skip Zram configuration"
     fi
     
     (
@@ -1477,9 +1486,8 @@ if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
 fi
 
 
-log "Removing installer scripts if present in main system..."
-rm -f /usr/local/bin/ros-installer
-rm -f /usr/local/bin/ros-reborn
+log "Removing ROS-Helper-Scripts package if present in main system..."
+pacman -R --noconfirm ros-helper-scripts
 
 if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
     log "Creating Bcachefs snapshots subvolume..."
@@ -1726,6 +1734,13 @@ show_completion_message() {
         recovery_info="\nRecovery Mode: Not configured"
     fi
 
+    local zram_info=""
+    if [ "$ENABLE_ZRAM" = "yes" ]; then
+        zram_info="\nZram: ENABLED (RAM/2, LZ4 compression)"
+    else
+        zram_info="\nZram: Disabled"
+    fi
+
     local fs_info="Root filesystem: $ROOT_FSTYPE"
     if [ "$ROOT_FSTYPE" = "xfs" ]; then
         fs_info="$fs_info (LZ4 optimized)"
@@ -1741,13 +1756,13 @@ Installation Summary:\n\
   - Hostname: $HOSTNAME\n\
   - User: $USERNAME\n\
   - Kernel: $KERNEL_NAME\n\
-  - $fs_info$recovery_info\n\n\
+  - $fs_info$recovery_info$zram_info\n\n\
 What's next:\n\
   1. Remove installation media\n\
   2. Reboot your system\n\
   3. Enjoy RengeOS!\n\n\
 Log file: $LOG_FILE\n\n\
-Press OK to finish." 26 70
+Press OK to finish." 28 70
 }
 
 main() {
@@ -1770,7 +1785,13 @@ main() {
     configure_boot_size
     configure_recovery_mode
     assign_partition_vars
-    configure_system_settings
+    detect_kernel
+    configure_zram
+    select_timezone
+    select_locale
+    set_hostname
+    set_username
+    set_passwords
     show_configuration_summary || exit 0
 
     dialog --title "FINAL WARNING" --defaultno --yesno "\
