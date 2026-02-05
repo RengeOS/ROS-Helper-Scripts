@@ -1318,9 +1318,8 @@ Installation Summary:\n\
   - User: ${USERNAME}\n\
   - Kernel: ${KERNEL_NAME} (installed)${other_kernels_info}${zram_info}\n\n\
 What's next:\n\
-  1. Remove installation media\n\
-  2. Reboot your system\n\
-  3. Enjoy RengeOS!\n\n\
+  1. Reboot your system\n\
+  2. Enjoy your new RengeOS!\n\n\
 Log file: ${LOG_FILE}\n\n\
 Press OK to finish." 24 70
 }
