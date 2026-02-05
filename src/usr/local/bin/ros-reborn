@@ -31,62 +31,62 @@ ENABLE_ZRAM="no"
 
 # Logging functions
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
+	echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $*" | tee -a "${LOG_FILE}"
-    if command -v dialog &>/dev/null; then
-        dialog --title "Error" --msgbox "$*\n\nCheck log: ${LOG_FILE}" 12 70
-    fi
-    cleanup_on_error
-    exit 1
+	echo -e "${RED}[ERROR]${NC} $*" | tee -a "${LOG_FILE}"
+	if command -v dialog &>/dev/null; then
+		dialog --title "Error" --msgbox "$*\n\nCheck log: ${LOG_FILE}" 12 70
+	fi
+	cleanup_on_error
+	exit 1
 }
 
 success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "${LOG_FILE}"
+	echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "${LOG_FILE}"
 }
 
 info() {
-    echo -e "${BLUE}[INFO]${NC} $*" | tee -a "${LOG_FILE}"
+	echo -e "${BLUE}[INFO]${NC} $*" | tee -a "${LOG_FILE}"
 }
 
 warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "${LOG_FILE}"
+	echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "${LOG_FILE}"
 }
 
 cleanup_on_error() {
-    warning "Attempting cleanup after error..."
-    umount -R /mnt/recovery 2>/dev/null || true
-    umount -R /mnt 2>/dev/null || true
-    unset root_pass root_pass_confirm user_pass user_pass_confirm 2>/dev/null || true
+	warning "Attempting cleanup after error..."
+	umount -R /mnt/recovery 2>/dev/null || true
+	umount -R /mnt 2>/dev/null || true
+	unset root_pass root_pass_confirm user_pass user_pass_confirm 2>/dev/null || true
 }
 
 check_dependencies() {
-    local deps=("dialog" "gdisk" "fdisk" "sfdisk" "unsquashfs" "arch-chroot" "genfstab" "grub-install" "bcachefs" "mkfs.xfs" "mkfs.vfat")
-    local missing=()
-    
-    for cmd in "${deps[@]}"; do
-        if ! command -v "${cmd}" &>/dev/null; then
-            missing+=("${cmd}")
-        fi
-    done
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        error "Missing required commands: ${missing[*]}\nPlease install them first."
-    fi
+	local deps=("dialog" "gdisk" "fdisk" "sfdisk" "unsquashfs" "arch-chroot" "genfstab" "grub-install" "bcachefs" "mkfs.xfs" "mkfs.vfat")
+	local missing=()
+
+	for cmd in "${deps[@]}"; do
+		if ! command -v "${cmd}" &>/dev/null; then
+			missing+=("${cmd}")
+		fi
+	done
+
+	if [[ ${#missing[@]} -gt 0 ]]; then
+		error "Missing required commands: ${missing[*]}\nPlease install them first."
+	fi
 }
 
 select_boot_mode() {
-    local detected_mode=""
-    if [[ -d /sys/firmware/efi/efivars ]]; then
-        detected_mode="UEFI"
-    else
-        detected_mode="LEGACY"
-    fi
-    
-    local choice
-    choice=$(dialog --title "Boot Mode Selection" --menu "\
+	local detected_mode=""
+	if [[ -d /sys/firmware/efi/efivars ]]; then
+		detected_mode="UEFI"
+	else
+		detected_mode="LEGACY"
+	fi
+
+	local choice
+	choice=$(dialog --title "Boot Mode Selection" --menu "\
 Select boot mode for installation:\n\n\
 Detected system: ${detected_mode}\n\n\
 UEFI Mode:\n\
@@ -98,91 +98,91 @@ Legacy BIOS Mode:\n\
   - Uses MBR partition table\n\
   - Boot partition: XFS\n\n\
 Select boot mode:" 22 70 2 \
-    "UEFI" "Modern UEFI boot (recommended for new systems)" \
-    "LEGACY" "Legacy BIOS boot (for older systems)" \
-    3>&1 1>&2 2>&3)
-    
-    if [[ $? -ne 0 ]]; then
-        exit 0
-    fi
-    
-    BOOT_MODE="${choice}"
-    
-    if [[ "${BOOT_MODE}" == "UEFI" ]]; then
-        BOOT_FS="vfat"
-        info "User selected: UEFI mode (will use FAT32 for /boot)"
-    else
-        BOOT_FS="xfs"
-        info "User selected: Legacy BIOS mode (will use XFS for /boot)"
-    fi
-    
-    if [[ "${BOOT_MODE}" != "${detected_mode}" ]]; then
-        if ! dialog --title "Warning" --yesno "\
+		"UEFI" "Modern UEFI boot (recommended for new systems)" \
+		"LEGACY" "Legacy BIOS boot (for older systems)" \
+		3>&1 1>&2 2>&3)
+
+	if [[ $? -ne 0 ]]; then
+		exit 0
+	fi
+
+	BOOT_MODE="${choice}"
+
+	if [[ "${BOOT_MODE}" == "UEFI" ]]; then
+		BOOT_FS="vfat"
+		info "User selected: UEFI mode (will use FAT32 for /boot)"
+	else
+		BOOT_FS="xfs"
+		info "User selected: Legacy BIOS mode (will use XFS for /boot)"
+	fi
+
+	if [[ "${BOOT_MODE}" != "${detected_mode}" ]]; then
+		if ! dialog --title "Warning" --yesno "\
 WARNING: You selected ${BOOT_MODE} mode but system detected ${detected_mode}!\n\n\
 This may cause boot issues if:\n\
   - You select UEFI on BIOS-only system\n\
   - You select LEGACY on UEFI-only system\n\n\
 Are you sure you want to continue with ${BOOT_MODE} mode?" 13 70; then
-            select_boot_mode
-        fi
-    fi
+			select_boot_mode
+		fi
+	fi
 }
 
 detect_kernel() {
-    local kernel_path="/rengeos-reborn/kernel"
-    local found_kernels=()
-    
-    if [[ ! -d "${kernel_path}" ]]; then
-        error "Kernel directory not found at ${kernel_path}"
-    fi
-    
-    while IFS= read -r kernel_file; do
-        local kname
-        kname=$(basename "${kernel_file}" | sed 's/^vmlinuz-//')
-        found_kernels+=("${kname}")
-    done < <(find "${kernel_path}" -name "vmlinuz-*" 2>/dev/null)
-    
-    if [[ ${#found_kernels[@]} -eq 0 ]]; then
-        error "No kernel found in ${kernel_path}"
-    fi
-    
-    if [[ ${#found_kernels[@]} -gt 1 ]]; then
-        log "Multiple kernels found, letting user choose..."
-        local kernel_options=()
-        for kname in "${found_kernels[@]}"; do
-            kernel_options+=("${kname}" "Kernel: ${kname}")
-        done
-        
-        KERNEL_NAME=$(dialog --title "Kernel Selection" --menu "\
+	local kernel_path="/rengeos-reborn/kernel"
+	local found_kernels=()
+
+	if [[ ! -d "${kernel_path}" ]]; then
+		error "Kernel directory not found at ${kernel_path}"
+	fi
+
+	while IFS= read -r kernel_file; do
+		local kname
+		kname=$(basename "${kernel_file}" | sed 's/^vmlinuz-//')
+		found_kernels+=("${kname}")
+	done < <(find "${kernel_path}" -name "vmlinuz-*" 2>/dev/null)
+
+	if [[ ${#found_kernels[@]} -eq 0 ]]; then
+		error "No kernel found in ${kernel_path}"
+	fi
+
+	if [[ ${#found_kernels[@]} -gt 1 ]]; then
+		log "Multiple kernels found, letting user choose..."
+		local kernel_options=()
+		for kname in "${found_kernels[@]}"; do
+			kernel_options+=("${kname}" "Kernel: ${kname}")
+		done
+
+		KERNEL_NAME=$(dialog --title "Kernel Selection" --menu "\
 Multiple kernels found in ${kernel_path}:\n\n\
 Select the kernel you want to install:\n\n\
 Use arrow keys to navigate, Enter to select." 18 70 10 "${kernel_options[@]}" 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]] || [[ -z "${KERNEL_NAME}" ]]; then
-            exit 0
-        fi
 
-        OTHER_KERNELS=""
-        for kname in "${found_kernels[@]}"; do
-            if [[ "${kname}" != "${KERNEL_NAME}" ]]; then
-                OTHER_KERNELS+="${kname} "
-            fi
-        done
-        OTHER_KERNELS=$(echo "${OTHER_KERNELS}" | xargs)
-        log "Kernels to remove: ${OTHER_KERNELS}"
-    else
-        KERNEL_NAME="${found_kernels[0]}"
-        OTHER_KERNELS=""
-    fi
-    
-    info "Selected kernel: ${KERNEL_NAME}"
-    
-    if [[ "${KERNEL_NAME}" == *"lts"* ]] || [[ "${KERNEL_NAME}" == *"LTS"* ]]; then
-        ROOT_FS="xfs"
-        log "Kernel LTS detected, will use XFS for root partition"
-    else
-        local fs_choice
-        fs_choice=$(dialog --title "Root Filesystem Selection" --menu "\
+		if [[ $? -ne 0 ]] || [[ -z "${KERNEL_NAME}" ]]; then
+			exit 0
+		fi
+
+		OTHER_KERNELS=""
+		for kname in "${found_kernels[@]}"; do
+			if [[ "${kname}" != "${KERNEL_NAME}" ]]; then
+				OTHER_KERNELS+="${kname} "
+			fi
+		done
+		OTHER_KERNELS=$(echo "${OTHER_KERNELS}" | xargs)
+		log "Kernels to remove: ${OTHER_KERNELS}"
+	else
+		KERNEL_NAME="${found_kernels[0]}"
+		OTHER_KERNELS=""
+	fi
+
+	info "Selected kernel: ${KERNEL_NAME}"
+
+	if [[ "${KERNEL_NAME}" == *"lts"* ]] || [[ "${KERNEL_NAME}" == *"LTS"* ]]; then
+		ROOT_FS="xfs"
+		log "Kernel LTS detected, will use XFS for root partition"
+	else
+		local fs_choice
+		fs_choice=$(dialog --title "Root Filesystem Selection" --menu "\
 Kernel selected: ${KERNEL_NAME}\n\n\
 Select root filesystem type:\n\n\
 Bcachefs:\n\
@@ -194,18 +194,18 @@ XFS:\n\
   - Mature filesystem\n\
   - No compression by default\n\n\
 Which filesystem do you want for root?" 22 70 2 \
-            "bcachefs" "Bcachefs (with LZ4 compression)" \
-            "xfs" "XFS (stable, no compression)" \
-            3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        ROOT_FS="${fs_choice}"
-    fi
-    
-    dialog --title "Kernel Detection" --msgbox "\
+			"bcachefs" "Bcachefs (with LZ4 compression)" \
+			"xfs" "XFS (stable, no compression)" \
+			3>&1 1>&2 2>&3)
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		ROOT_FS="${fs_choice}"
+	fi
+
+	dialog --title "Kernel Detection" --msgbox "\
 Kernel selected from RengeOS installation:\n\n\
   Kernel: ${KERNEL_NAME}\n\
   Root Filesystem: ${ROOT_FS}\n\
@@ -214,89 +214,89 @@ This kernel will be used for installation." 13 70
 }
 
 select_timezone() {
-    local zoneinfo_path="/usr/share/zoneinfo"
-    
-    if [[ ! -d "${zoneinfo_path}" ]]; then
-        warning "Timezone directory not found, using default"
-        TIMEZONE="UTC"
-        return
-    fi
-    
-    local regions=()
-    local region_list
-    region_list=$(find "${zoneinfo_path}" -maxdepth 1 -type d -printf "%f\n" | grep -vE "^(posix|right|Etc|SystemV|zoneinfo)$" | sort)
-    local root_zones
-    root_zones=$(find "${zoneinfo_path}" -maxdepth 1 -type f -printf "%f\n" | sort)
-    
-    while IFS= read -r region; do
-        if [[ -n "${region}" ]]; then
-            regions+=("${region}" "")
-        fi
-    done <<< "${region_list}"
-    
-    while IFS= read -r zone; do
-        if [[ -n "${zone}" ]]; then
-            regions+=("${zone}" "Direct timezone")
-        fi
-    done <<< "${root_zones}"
-    
-    if [[ ${#regions[@]} -eq 0 ]]; then
-        warning "No timezones found, using default UTC"
-        TIMEZONE="UTC"
-        return
-    fi
-    
-    local selected_region
-    selected_region=$(dialog --title "Timezone Selection - Step 1/2" --menu "\
+	local zoneinfo_path="/usr/share/zoneinfo"
+
+	if [[ ! -d "${zoneinfo_path}" ]]; then
+		warning "Timezone directory not found, using default"
+		TIMEZONE="UTC"
+		return
+	fi
+
+	local regions=()
+	local region_list
+	region_list=$(find "${zoneinfo_path}" -maxdepth 1 -type d -printf "%f\n" | grep -vE "^(posix|right|Etc|SystemV|zoneinfo)$" | sort)
+	local root_zones
+	root_zones=$(find "${zoneinfo_path}" -maxdepth 1 -type f -printf "%f\n" | sort)
+
+	while IFS= read -r region; do
+		if [[ -n "${region}" ]]; then
+			regions+=("${region}" "")
+		fi
+	done <<<"${region_list}"
+
+	while IFS= read -r zone; do
+		if [[ -n "${zone}" ]]; then
+			regions+=("${zone}" "Direct timezone")
+		fi
+	done <<<"${root_zones}"
+
+	if [[ ${#regions[@]} -eq 0 ]]; then
+		warning "No timezones found, using default UTC"
+		TIMEZONE="UTC"
+		return
+	fi
+
+	local selected_region
+	selected_region=$(dialog --title "Timezone Selection - Step 1/2" --menu "\
 Select your continent/region:\n\n\
 Use arrow keys to navigate, Enter to select." 20 60 12 "${regions[@]}" 3>&1 1>&2 2>&3)
-    
-    if [[ $? -ne 0 ]]; then
-        exit 0
-    fi
-    
-    if [[ -d "${zoneinfo_path}/${selected_region}" ]]; then
-        local cities=()
-        local city_list
-        city_list=$(find "${zoneinfo_path}/${selected_region}" -type f -printf "%f\n" | sort)
-        
-        while IFS= read -r city; do
-            if [[ -n "${city}" ]]; then
-                cities+=("${city}" "")
-            fi
-        done <<< "${city_list}"
-        
-        if [[ ${#cities[@]} -eq 0 ]]; then
-            warning "No cities found in ${selected_region}, using region as timezone"
-            TIMEZONE="${selected_region}"
-            return
-        fi
-        
-        local selected_city
-        selected_city=$(dialog --title "Timezone Selection - Step 2/2" --menu "\
+
+	if [[ $? -ne 0 ]]; then
+		exit 0
+	fi
+
+	if [[ -d "${zoneinfo_path}/${selected_region}" ]]; then
+		local cities=()
+		local city_list
+		city_list=$(find "${zoneinfo_path}/${selected_region}" -type f -printf "%f\n" | sort)
+
+		while IFS= read -r city; do
+			if [[ -n "${city}" ]]; then
+				cities+=("${city}" "")
+			fi
+		done <<<"${city_list}"
+
+		if [[ ${#cities[@]} -eq 0 ]]; then
+			warning "No cities found in ${selected_region}, using region as timezone"
+			TIMEZONE="${selected_region}"
+			return
+		fi
+
+		local selected_city
+		selected_city=$(dialog --title "Timezone Selection - Step 2/2" --menu "\
 Selected region: ${selected_region}\n\n\
 Select your city/timezone:\n\n\
 Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        else
-            TIMEZONE="${selected_region}/${selected_city}"
-        fi
-    else
-        TIMEZONE="${selected_region}"
-    fi
-    
-    if [[ ! -f "${zoneinfo_path}/${TIMEZONE}" ]]; then
-        warning "Selected timezone ${TIMEZONE} not found, using UTC"
-        TIMEZONE="UTC"
-    else
-        info "Selected timezone: ${TIMEZONE}"
-    fi
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		else
+			TIMEZONE="${selected_region}/${selected_city}"
+		fi
+	else
+		TIMEZONE="${selected_region}"
+	fi
+
+	if [[ ! -f "${zoneinfo_path}/${TIMEZONE}" ]]; then
+		warning "Selected timezone ${TIMEZONE} not found, using UTC"
+		TIMEZONE="UTC"
+	else
+		info "Selected timezone: ${TIMEZONE}"
+	fi
 }
 
 show_welcome() {
-    dialog --title "RengeOS Reborn - Reinstall Mode" --msgbox "\
+	dialog --title "RengeOS Reborn - Reinstall Mode" --msgbox "\
 Welcome to RengeOS Reborn Script!\n\n\
 This installer will help you reinstall RengeOS on existing partitions:\n\
   - Select boot mode (UEFI or Legacy BIOS)\n\
@@ -321,114 +321,114 @@ Press OK to continue or Cancel to exit." 35 75
 }
 
 select_partitions() {
-    local partitions=()
-    local count=0
-    
-    log "Scanning available partitions..."
-    
-    while IFS= read -r line; do
-        local name size type fstype
-        name=$(echo "${line}" | awk '{print $1}')
-        size=$(echo "${line}" | awk '{print $4}')
-        type=$(echo "${line}" | awk '{print $6}')
-        fstype=$(echo "${line}" | awk '{print $5}')
-        
-        if [[ -z "${fstype}" ]]; then
-            fstype="(empty)"
-        fi
-        
-        partitions+=("${name}" "${size} - ${fstype} - ${type}")
-        count=$((count + 1))
-    done < <(lsblk -nlo NAME,TYPE,MOUNTPOINT,SIZE,FSTYPE,PARTTYPE | grep "part" | grep -v "SWAP")
-    
-    if [[ ${#partitions[@]} -eq 0 ]]; then
-        error "No partitions found on system"
-    fi
-    
-    info "Found ${count} partition(s) available"
-    
-    if [[ "${BOOT_MODE}" == "UEFI" ]]; then
-        BOOT_PART=$(dialog --title "Select EFI Partition" --menu "\
+	local partitions=()
+	local count=0
+
+	log "Scanning available partitions..."
+
+	while IFS= read -r line; do
+		local name size type fstype
+		name=$(echo "${line}" | awk '{print $1}')
+		size=$(echo "${line}" | awk '{print $4}')
+		type=$(echo "${line}" | awk '{print $6}')
+		fstype=$(echo "${line}" | awk '{print $5}')
+
+		if [[ -z "${fstype}" ]]; then
+			fstype="(empty)"
+		fi
+
+		partitions+=("${name}" "${size} - ${fstype} - ${type}")
+		count=$((count + 1))
+	done < <(lsblk -nlo NAME,TYPE,MOUNTPOINT,SIZE,FSTYPE,PARTTYPE | grep "part" | grep -v "SWAP")
+
+	if [[ ${#partitions[@]} -eq 0 ]]; then
+		error "No partitions found on system"
+	fi
+
+	info "Found ${count} partition(s) available"
+
+	if [[ "${BOOT_MODE}" == "UEFI" ]]; then
+		BOOT_PART=$(dialog --title "Select EFI Partition" --menu "\
 Select the EFI System Partition:\n\n\
 Boot Mode: UEFI\n\
 This partition will be formatted as FAT32.\n\n\
 Found ${count} partition(s).\n\
 Use arrow keys to select, Enter to confirm.\n\n\
 WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1 1>&2 2>&3) || exit 0
-        
-        BOOT_PART="/dev/${BOOT_PART}"
-        BOOT_FS="vfat"
-        log "User selected EFI partition: ${BOOT_PART}"
-    else
-        BOOT_PART=$(dialog --title "Select Boot Partition" --menu "\
+
+		BOOT_PART="/dev/${BOOT_PART}"
+		BOOT_FS="vfat"
+		log "User selected EFI partition: ${BOOT_PART}"
+	else
+		BOOT_PART=$(dialog --title "Select Boot Partition" --menu "\
 Select the Boot Partition:\n\n\
 Boot Mode: Legacy BIOS\n\
 This partition will be formatted as XFS.\n\n\
 Found ${count} partition(s).\n\
 Use arrow keys to select, Enter to confirm.\n\n\
 WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1 1>&2 2>&3) || exit 0
-        
-        BOOT_PART="/dev/${BOOT_PART}"
-        BOOT_FS="xfs"
-        log "User selected Boot partition: ${BOOT_PART}"
-    fi
-    
-    ROOT_PART=$(dialog --title "Select Root Partition" --menu "\
+
+		BOOT_PART="/dev/${BOOT_PART}"
+		BOOT_FS="xfs"
+		log "User selected Boot partition: ${BOOT_PART}"
+	fi
+
+	ROOT_PART=$(dialog --title "Select Root Partition" --menu "\
 Select the Root Partition:\n\n\
 This partition will be formatted as ${ROOT_FS}.\n\n\
 Found ${count} partition(s).\n\
 Use arrow keys to select, Enter to confirm.\n\n\
 WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1 1>&2 2>&3) || exit 0
-    
-    ROOT_PART="/dev/${ROOT_PART}"
-    log "User selected Root partition: ${ROOT_PART}"
-    
-    if [[ "${BOOT_PART}" == "${ROOT_PART}" ]]; then
-        error "Boot and Root partitions cannot be the same!"
-    fi
-    
-    if dialog --title "Recovery Partition (Optional)" --yesno "\
+
+	ROOT_PART="/dev/${ROOT_PART}"
+	log "User selected Root partition: ${ROOT_PART}"
+
+	if [[ "${BOOT_PART}" == "${ROOT_PART}" ]]; then
+		error "Boot and Root partitions cannot be the same!"
+	fi
+
+	if dialog --title "Recovery Partition (Optional)" --yesno "\
 Do you want to select a Recovery partition?\n\n\
 Recovery partition can be used to boot into emergency mode.\n\
 It must already exist and will be registered in GRUB.\n\n\
 Select Recovery partition now?" 12 60; then
-        RECOVERY_PART=$(dialog --title "Select Recovery Partition" --menu "\
+		RECOVERY_PART=$(dialog --title "Select Recovery Partition" --menu "\
 Select the Recovery Partition:\n\n\
 This partition should already contain a bootable recovery system.\n\
 It will NOT be formatted, only registered in GRUB.\n\n\
 Found ${count} partition(s).\n\
 Use arrow keys to select, Enter to confirm." 20 70 10 "${partitions[@]}" 3>&1 1>&2 2>&3) || RECOVERY_PART=""
-        
-        if [[ -n "${RECOVERY_PART}" ]]; then
-            RECOVERY_PART="/dev/${RECOVERY_PART}"
-            ENABLE_RECOVERY="yes"
-            log "User selected Recovery partition: ${RECOVERY_PART}"
-            
-            if [[ "${RECOVERY_PART}" == "${BOOT_PART}" ]] || [[ "${RECOVERY_PART}" == "${ROOT_PART}" ]]; then
-                error "Recovery partition cannot be the same as Boot or Root!"
-            fi
-        else
-            ENABLE_RECOVERY="no"
-        fi
-    else
-        ENABLE_RECOVERY="no"
-        log "User skipped Recovery partition selection"
-    fi
-    
-    DISK=$(lsblk -ndo PKNAME "${ROOT_PART}" | head -n1)
-    DISK="/dev/${DISK}"
-    log "Detected parent disk: ${DISK}"
-    
-    local boot_info root_info recovery_info
-    boot_info=$(lsblk "${BOOT_PART}" -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "N/A")
-    root_info=$(lsblk "${ROOT_PART}" -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "N/A")
-    recovery_info=""
-    
-    if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
-        recovery_info="\n\nRECOVERY Partition:\n  Device: ${RECOVERY_PART}\n  Will be registered in GRUB (NOT formatted)\n  Current info:\n$(lsblk "${RECOVERY_PART}" -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "N/A")"
-    fi
-    
-    dialog --title "Partition Selection Summary" --yesno "\
+
+		if [[ -n "${RECOVERY_PART}" ]]; then
+			RECOVERY_PART="/dev/${RECOVERY_PART}"
+			ENABLE_RECOVERY="yes"
+			log "User selected Recovery partition: ${RECOVERY_PART}"
+
+			if [[ "${RECOVERY_PART}" == "${BOOT_PART}" ]] || [[ "${RECOVERY_PART}" == "${ROOT_PART}" ]]; then
+				error "Recovery partition cannot be the same as Boot or Root!"
+			fi
+		else
+			ENABLE_RECOVERY="no"
+		fi
+	else
+		ENABLE_RECOVERY="no"
+		log "User skipped Recovery partition selection"
+	fi
+
+	DISK=$(lsblk -ndo PKNAME "${ROOT_PART}" | head -n1)
+	DISK="/dev/${DISK}"
+	log "Detected parent disk: ${DISK}"
+
+	local boot_info root_info recovery_info
+	boot_info=$(lsblk "${BOOT_PART}" -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "N/A")
+	root_info=$(lsblk "${ROOT_PART}" -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "N/A")
+	recovery_info=""
+
+	if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
+		recovery_info="\n\nRECOVERY Partition:\n  Device: ${RECOVERY_PART}\n  Will be registered in GRUB (NOT formatted)\n  Current info:\n$(lsblk "${RECOVERY_PART}" -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null || echo "N/A")"
+	fi
+
+	dialog --title "Partition Selection Summary" --yesno "\
 Please confirm your partition selection:\n\n\
 Boot Mode: ${BOOT_MODE}\n\
 Parent Disk: ${DISK}\n\n\
@@ -446,135 +446,135 @@ Continue with installation?" 28 75 || exit 0
 }
 
 configure_system_locale() {
-    select_timezone
-    
-    local locales=(
-        "en_US.UTF-8" "English (US)"
-        "en_GB.UTF-8" "English (UK)"
-        "vi_VN.UTF-8" "Vietnamese"
-        "ja_JP.UTF-8" "Japanese"
-        "zh_CN.UTF-8" "Chinese (Simplified)"
-    )
-    
-    LOCALE=$(dialog --title "Locale Selection" --menu "\
+	select_timezone
+
+	local locales=(
+		"en_US.UTF-8" "English (US)"
+		"en_GB.UTF-8" "English (UK)"
+		"vi_VN.UTF-8" "Vietnamese"
+		"ja_JP.UTF-8" "Japanese"
+		"zh_CN.UTF-8" "Chinese (Simplified)"
+	)
+
+	LOCALE=$(dialog --title "Locale Selection" --menu "\
 Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3)
-    
-    if [[ $? -ne 0 ]]; then
-        exit 0
-    fi
+
+	if [[ $? -ne 0 ]]; then
+		exit 0
+	fi
 }
 
 configure_user_settings() {
-    while true; do
-        HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
+	while true; do
+		HOSTNAME=$(dialog --title "System Configuration" --inputbox "\
 Enter hostname:\n\n\
 The hostname identifies your computer on a network.\n\
 Use lowercase letters, numbers, and hyphens only." 12 60 "" 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        HOSTNAME=$(echo "${HOSTNAME}" | xargs)
-        
-        if [[ -z "${HOSTNAME}" ]]; then
-            dialog --title "Error" --msgbox "Hostname cannot be empty!\nPlease enter a valid hostname." 8 50
-            continue
-        fi
-        
-        if ! [[ "${HOSTNAME}" =~ ^[a-z0-9-]+$ ]]; then
-            dialog --title "Error" --msgbox "Invalid hostname!\nOnly lowercase letters, numbers, and hyphens are allowed.\n\nPlease enter a valid hostname." 10 60
-            continue
-        fi
-        
-        break
-    done
-    
-    while true; do
-        USERNAME=$(dialog --title "User Configuration" --inputbox "\
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		HOSTNAME=$(echo "${HOSTNAME}" | xargs)
+
+		if [[ -z "${HOSTNAME}" ]]; then
+			dialog --title "Error" --msgbox "Hostname cannot be empty!\nPlease enter a valid hostname." 8 50
+			continue
+		fi
+
+		if ! [[ "${HOSTNAME}" =~ ^[a-z0-9-]+$ ]]; then
+			dialog --title "Error" --msgbox "Invalid hostname!\nOnly lowercase letters, numbers, and hyphens are allowed.\n\nPlease enter a valid hostname." 10 60
+			continue
+		fi
+
+		break
+	done
+
+	while true; do
+		USERNAME=$(dialog --title "User Configuration" --inputbox "\
 Enter username:\n\n\
 This will be your primary user account.\n\
 Use lowercase letters and numbers only." 12 60 "" 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        USERNAME=$(echo "${USERNAME}" | xargs)
-        
-        if [[ -z "${USERNAME}" ]]; then
-            dialog --title "Error" --msgbox "Username cannot be empty!\nPlease enter a valid username." 8 50
-            continue
-        fi
-        
-        if ! [[ "${USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-            dialog --title "Error" --msgbox "Invalid username!\nMust start with lowercase letter or underscore.\nOnly lowercase letters, numbers, hyphens and underscores are allowed.\n\nPlease enter a valid username." 11 60
-            continue
-        fi
-        
-        break
-    done
-    
-    while true; do
-        local root_pass
-        root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for only main system)" 12 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        if [[ -z "${root_pass}" ]]; then
-            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
-            continue
-        fi
-        
-        local root_pass_confirm
-        root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        if [[ "${root_pass}" == "${root_pass_confirm}" ]]; then
-            ROOT_PASSWORD="${root_pass}"
-            break
-        else
-            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
-        fi
-    done
-    
-    while true; do
-        local user_pass
-        user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '${USERNAME}':" 10 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        if [[ -z "${user_pass}" ]]; then
-            dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
-            continue
-        fi
-        
-        local user_pass_confirm
-        user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
-        
-        if [[ $? -ne 0 ]]; then
-            exit 0
-        fi
-        
-        if [[ "${user_pass}" == "${user_pass_confirm}" ]]; then
-            USER_PASSWORD="${user_pass}"
-            break
-        else
-            dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
-        fi
-    done
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		USERNAME=$(echo "${USERNAME}" | xargs)
+
+		if [[ -z "${USERNAME}" ]]; then
+			dialog --title "Error" --msgbox "Username cannot be empty!\nPlease enter a valid username." 8 50
+			continue
+		fi
+
+		if ! [[ "${USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+			dialog --title "Error" --msgbox "Invalid username!\nMust start with lowercase letter or underscore.\nOnly lowercase letters, numbers, hyphens and underscores are allowed.\n\nPlease enter a valid username." 11 60
+			continue
+		fi
+
+		break
+	done
+
+	while true; do
+		local root_pass
+		root_pass=$(dialog --title "Root Password" --insecure --passwordbox "Enter password for root user:\n\n(Will be used for only main system)" 12 60 3>&1 1>&2 2>&3)
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		if [[ -z "${root_pass}" ]]; then
+			dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+			continue
+		fi
+
+		local root_pass_confirm
+		root_pass_confirm=$(dialog --title "Root Password" --insecure --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3)
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		if [[ "${root_pass}" == "${root_pass_confirm}" ]]; then
+			ROOT_PASSWORD="${root_pass}"
+			break
+		else
+			dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+		fi
+	done
+
+	while true; do
+		local user_pass
+		user_pass=$(dialog --title "User Password" --insecure --passwordbox "Enter password for user '${USERNAME}':" 10 60 3>&1 1>&2 2>&3)
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		if [[ -z "${user_pass}" ]]; then
+			dialog --title "Error" --msgbox "Password cannot be empty!" 7 40
+			continue
+		fi
+
+		local user_pass_confirm
+		user_pass_confirm=$(dialog --title "User Password" --insecure --passwordbox "Confirm user password:" 10 60 3>&1 1>&2 2>&3)
+
+		if [[ $? -ne 0 ]]; then
+			exit 0
+		fi
+
+		if [[ "${user_pass}" == "${user_pass_confirm}" ]]; then
+			USER_PASSWORD="${user_pass}"
+			break
+		else
+			dialog --title "Error" --msgbox "Passwords do not match!\nPlease try again." 8 40
+		fi
+	done
 }
 
 configure_zram() {
-    log "Prompting user for Zram configuration..."
-    if dialog --title "Zram Configuration" --yesno "\
+	log "Prompting user for Zram configuration..."
+	if dialog --title "Zram Configuration" --yesno "\
 Do you want to enable Zram for swap compression?\n\n\
 What is Zram?\n\
   - Compressed swap in RAM (faster than disk)\n\
@@ -583,38 +583,38 @@ What is Zram?\n\
   - Reduces disk wear on SSD/HDD\n\n\
 Recommended: YES for systems with 4GB+ RAM\n\n\
 Enable Zram now?" 16 60; then
-        ENABLE_ZRAM="yes"
-        log "User chose to enable Zram"
-    else
-        ENABLE_ZRAM="no"
-        log "User chose to skip Zram configuration"
-    fi
+		ENABLE_ZRAM="yes"
+		log "User chose to enable Zram"
+	else
+		ENABLE_ZRAM="no"
+		log "User chose to skip Zram configuration"
+	fi
 }
 
 show_configuration_summary() {
-    local boot_fs_display
-    if [[ "${BOOT_MODE}" == "UEFI" ]]; then
-        boot_fs_display="FAT32 (EFI)"
-    else
-        boot_fs_display="XFS (GRUB)"
-    fi
-    
-    local recovery_status="Not selected"
-    if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
-        recovery_status="Enabled: ${RECOVERY_PART}"
-    fi
-    
-    local zram_status="Disabled"
-    if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
-        zram_status="Enabled (RAM/2, LZ4)"
-    fi
-    
-    local other_kernels_info=""
-    if [[ -n "${OTHER_KERNELS}" ]]; then
-        other_kernels_info="\n  Other kernels to remove: ${OTHER_KERNELS}"
-    fi
-    
-    dialog --title "Configuration Summary" --yesno "\
+	local boot_fs_display
+	if [[ "${BOOT_MODE}" == "UEFI" ]]; then
+		boot_fs_display="FAT32 (EFI)"
+	else
+		boot_fs_display="XFS (GRUB)"
+	fi
+
+	local recovery_status="Not selected"
+	if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
+		recovery_status="Enabled: ${RECOVERY_PART}"
+	fi
+
+	local zram_status="Disabled"
+	if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
+		zram_status="Enabled (RAM/2, LZ4)"
+	fi
+
+	local other_kernels_info=""
+	if [[ -n "${OTHER_KERNELS}" ]]; then
+		other_kernels_info="\n  Other kernels to remove: ${OTHER_KERNELS}"
+	fi
+
+	dialog --title "Configuration Summary" --yesno "\
 Please review your configuration:\n\n\
 PARTITION CONFIGURATION:\n\
   Parent Disk: ${DISK}\n\
@@ -632,251 +632,251 @@ SYSTEM CONFIGURATION:\n\
 WARNING: Selected partitions will be FORMATTED!\n\
          ALL DATA will be LOST!\n\n\
 Continue with installation?" 25 70
-    
-    if [[ $? -ne 0 ]]; then
-        exit 0
-    fi
+
+	if [[ $? -ne 0 ]]; then
+		exit 0
+	fi
 }
 
 format_partitions() {
-    (
-    echo "5"
-    echo "XXX"
-    echo "Unmounting existing partitions..."
-    echo "XXX"
-    
-    log "Checking if /mnt is mounted and unmounting if necessary..."
-    if mountpoint -q /mnt; then
-        log "Unmounting /mnt..."
-        umount -R /mnt 2>/dev/null || {
-            log "Warning: Could not unmount /mnt, trying lazy unmount..."
-            umount -l /mnt 2>/dev/null || true
-        }
-    fi
-    
-    if [[ -d /mnt/boot ]] && mountpoint -q /mnt/boot; then
-        log "Unmounting /mnt/boot..."
-        umount /mnt/boot 2>/dev/null || {
-            umount -l /mnt/boot 2>/dev/null || true
-        }
-    fi
-    
-    sync
-    sleep 2
-    
-    echo "10"
-    sleep 1
-    echo "XXX"
-    echo "Formatting root partition with ${ROOT_FS}..."
-    echo "XXX"
+	(
+		echo "5"
+		echo "XXX"
+		echo "Unmounting existing partitions..."
+		echo "XXX"
 
-    log "Formatting ${ROOT_PART} with ${ROOT_FS}..."
+		log "Checking if /mnt is mounted and unmounting if necessary..."
+		if mountpoint -q /mnt; then
+			log "Unmounting /mnt..."
+			umount -R /mnt 2>/dev/null || {
+				log "Warning: Could not unmount /mnt, trying lazy unmount..."
+				umount -l /mnt 2>/dev/null || true
+			}
+		fi
 
-    wipefs -af "${ROOT_PART}" >/dev/null 2>&1 || {
-        log "Warning: Could not wipe signatures from ${ROOT_PART}, continuing anyway..."
-    }
-    sleep 2
+		if [[ -d /mnt/boot ]] && mountpoint -q /mnt/boot; then
+			log "Unmounting /mnt/boot..."
+			umount /mnt/boot 2>/dev/null || {
+				umount -l /mnt/boot 2>/dev/null || true
+			}
+		fi
 
-    if [[ "${ROOT_FS}" == "bcachefs" ]]; then
-        log "Formatting ${ROOT_PART} with Bcachefs..."
-        
-        if ! bcachefs format \
-            --force \
-            --compression=lz4 \
-            --background_compression=lz4 \
-            --metadata_replicas=1 \
-            --data_replicas=1 \
-            --acl \
-            --label=RengeOS_Root \
-            "${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
-            error "Failed to format root partition with bcachefs"
-        fi
-        
-        log "Bcachefs root partition formatted successfully"
-    else
-        log "Formatting ${ROOT_PART} with XFS (optimized for LTS kernel)..."
-        
-        if ! mkfs.xfs -f \
-            -i size=512 \
-            -n size=8192 \
-            -d agcount=4 \
-            -l size=128m \
-            -m crc=1 \
-            -L RengeOS_Root \
-            "${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
-            error "Failed to format root partition with XFS"
-        fi
-        
-        log "XFS root partition formatted successfully"
-    fi
+		sync
+		sleep 2
 
-    echo "50"
-    echo "XXX"
-    echo "Formatting boot partition with ${BOOT_FS}..."
-    echo "XXX"
+		echo "10"
+		sleep 1
+		echo "XXX"
+		echo "Formatting root partition with ${ROOT_FS}..."
+		echo "XXX"
 
-    log "Formatting ${BOOT_PART} as ${BOOT_FS}..."
-    
-    wipefs -af "${BOOT_PART}" >/dev/null 2>&1 || {
-        log "Warning: Could not wipe signatures from ${BOOT_PART}, continuing anyway..."
-    }
-    sleep 1
-    
-    if [[ "${BOOT_MODE}" == "UEFI" ]]; then
-        log "Formatting as FAT32 EFI System Partition..."
-        if ! mkfs.vfat -F 32 -n "RengeOS_EFI" "${BOOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
-            error "Failed to format boot partition with FAT32"
-        fi
-        log "FAT32 EFI System Partition formatted successfully"
-    else
-        log "Formatting as XFS boot partition..."
-        if ! mkfs.xfs -f \
-            -i size=512 \
-            -n size=4096 \
-            -d agcount=4 \
-            -l size=64m \
-            -m crc=1 \
-            -L RengeOS_Boot \
-            "${BOOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
-            error "Failed to format boot partition with XFS"
-        fi
-        log "XFS boot partition formatted successfully"
-    fi
-    
-    sleep 1
+		log "Formatting ${ROOT_PART} with ${ROOT_FS}..."
 
-    echo "100"
-    echo "XXX"
-    echo "Partitions formatted successfully"
-    echo "XXX"
-    sleep 1
+		wipefs -af "${ROOT_PART}" >/dev/null 2>&1 || {
+			log "Warning: Could not wipe signatures from ${ROOT_PART}, continuing anyway..."
+		}
+		sleep 2
 
-    ) | dialog --title "Step 1/4: Formatting Partitions" --gauge "Starting partition formatting..." 10 70 0
+		if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+			log "Formatting ${ROOT_PART} with Bcachefs..."
 
-    success "Partition formatting completed"
+			if ! bcachefs format \
+				--force \
+				--compression=lz4 \
+				--background_compression=lz4 \
+				--metadata_replicas=1 \
+				--data_replicas=1 \
+				--acl \
+				--label=RengeOS_Root \
+				"${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
+				error "Failed to format root partition with bcachefs"
+			fi
+
+			log "Bcachefs root partition formatted successfully"
+		else
+			log "Formatting ${ROOT_PART} with XFS (optimized for LTS kernel)..."
+
+			if ! mkfs.xfs -f \
+				-i size=512 \
+				-n size=8192 \
+				-d agcount=4 \
+				-l size=128m \
+				-m crc=1 \
+				-L RengeOS_Root \
+				"${ROOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
+				error "Failed to format root partition with XFS"
+			fi
+
+			log "XFS root partition formatted successfully"
+		fi
+
+		echo "50"
+		echo "XXX"
+		echo "Formatting boot partition with ${BOOT_FS}..."
+		echo "XXX"
+
+		log "Formatting ${BOOT_PART} as ${BOOT_FS}..."
+
+		wipefs -af "${BOOT_PART}" >/dev/null 2>&1 || {
+			log "Warning: Could not wipe signatures from ${BOOT_PART}, continuing anyway..."
+		}
+		sleep 1
+
+		if [[ "${BOOT_MODE}" == "UEFI" ]]; then
+			log "Formatting as FAT32 EFI System Partition..."
+			if ! mkfs.vfat -F 32 -n "RengeOS_EFI" "${BOOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
+				error "Failed to format boot partition with FAT32"
+			fi
+			log "FAT32 EFI System Partition formatted successfully"
+		else
+			log "Formatting as XFS boot partition..."
+			if ! mkfs.xfs -f \
+				-i size=512 \
+				-n size=4096 \
+				-d agcount=4 \
+				-l size=64m \
+				-m crc=1 \
+				-L RengeOS_Boot \
+				"${BOOT_PART}" 2>&1 | tee -a "${LOG_FILE}"; then
+				error "Failed to format boot partition with XFS"
+			fi
+			log "XFS boot partition formatted successfully"
+		fi
+
+		sleep 1
+
+		echo "100"
+		echo "XXX"
+		echo "Partitions formatted successfully"
+		echo "XXX"
+		sleep 1
+
+	) | dialog --title "Step 1/4: Formatting Partitions" --gauge "Starting partition formatting..." 10 70 0
+
+	success "Partition formatting completed"
 }
 
 mount_and_extract() {
-    (
-    echo "5"
-    echo "XXX"
-    echo "Mounting root partition..."
-    echo "XXX"
+	(
+		echo "5"
+		echo "XXX"
+		echo "Mounting root partition..."
+		echo "XXX"
 
-    log "Mounting ${ROOT_PART} to /mnt..."
-    
-    mkdir -p /mnt
-    
-    if [[ "${ROOT_FS}" == "bcachefs" ]]; then
-        if ! mount -t bcachefs -o noatime,discard "${ROOT_PART}" /mnt; then
-            error "Failed to mount root partition"
-        fi
-    else
-        if ! mount -t xfs -o noatime,discard "${ROOT_PART}" /mnt; then
-            error "Failed to mount root partition"
-        fi
-    fi
-    
-    log "Root partition mounted successfully"
+		log "Mounting ${ROOT_PART} to /mnt..."
 
-    echo "10"
-    sleep 1
-    echo "XXX"
-    echo "Extracting system files to root..."
-    echo "XXX"
+		mkdir -p /mnt
 
-    log "Looking for airootfs in /rengeos-reborn/airootfs/..."
+		if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+			if ! mount -t bcachefs -o noatime,discard "${ROOT_PART}" /mnt; then
+				error "Failed to mount root partition"
+			fi
+		else
+			if ! mount -t xfs -o noatime,discard "${ROOT_PART}" /mnt; then
+				error "Failed to mount root partition"
+			fi
+		fi
 
-    local airootfs_path=""
-    if [[ -f /rengeos-reborn/airootfs/airootfs.sfs ]]; then
-        airootfs_path="/rengeos-reborn/airootfs/airootfs.sfs"
-    elif [[ -f /rengeos-reborn/airootfs.sfs ]]; then
-        airootfs_path="/rengeos-reborn/airootfs.sfs"
-    else
-        airootfs_path=$(find /rengeos-reborn -name "*.sfs" -type f 2>/dev/null | head -n1)
-    fi
+		log "Root partition mounted successfully"
 
-    if [[ -z "${airootfs_path}" ]] || [[ ! -f "${airootfs_path}" ]]; then
-        error "System image (airootfs.sfs) not found in /rengeos-reborn/"
-    fi
+		echo "10"
+		sleep 1
+		echo "XXX"
+		echo "Extracting system files to root..."
+		echo "XXX"
 
-    log "Found system image at: ${airootfs_path}"
-    log "Extracting system with unsquashfs to /mnt..."
+		log "Looking for airootfs in /rengeos-reborn/airootfs/..."
 
-    if ! unsquashfs -f -d /mnt "${airootfs_path}" >/tmp/unsquashfs.log 2>&1; then
-        error "Failed to extract system image from ${airootfs_path}"
-    fi
-    
-    log "System extracted successfully to /mnt"
+		local airootfs_path=""
+		if [[ -f /rengeos-reborn/airootfs/airootfs.sfs ]]; then
+			airootfs_path="/rengeos-reborn/airootfs/airootfs.sfs"
+		elif [[ -f /rengeos-reborn/airootfs.sfs ]]; then
+			airootfs_path="/rengeos-reborn/airootfs.sfs"
+		else
+			airootfs_path=$(find /rengeos-reborn -name "*.sfs" -type f 2>/dev/null | head -n1)
+		fi
 
-    echo "50"
-    sleep 1
-    echo "XXX"
-    echo "Preparing boot partition..."
-    echo "XXX"
+		if [[ -z "${airootfs_path}" ]] || [[ ! -f "${airootfs_path}" ]]; then
+			error "System image (airootfs.sfs) not found in /rengeos-reborn/"
+		fi
 
-    log "Handling /boot directory..."
-    
-    if [[ -d /mnt/boot ]] && [[ -n "$(ls -A /mnt/boot 2>/dev/null)" ]]; then
-        mkdir -p /mnt/boot_temp
-        mv /mnt/boot/* /mnt/boot_temp/ 2>/dev/null || {
-            log "Warning: Could not move existing boot files, continuing..."
-        }
-    else
-        mkdir -p /mnt/boot
-        mkdir -p /mnt/boot_temp
-    fi
+		log "Found system image at: ${airootfs_path}"
+		log "Extracting system with unsquashfs to /mnt..."
 
-    log "Mounting ${BOOT_PART} to /mnt/boot..."
-    
-    if [[ "${BOOT_MODE}" == "UEFI" ]]; then
-        if ! mount -t vfat -o defaults,utf8,dmask=0022,fmask=0133 "${BOOT_PART}" /mnt/boot; then
-            error "Failed to mount FAT32 boot partition"
-        fi
-    else
-        if ! mount -t xfs -o noatime,nodiratime,logbufs=8,logbsize=256k "${BOOT_PART}" /mnt/boot; then
-            error "Failed to mount XFS boot partition"
-        fi
-    fi
+		if ! unsquashfs -f -d /mnt "${airootfs_path}" >/tmp/unsquashfs.log 2>&1; then
+			error "Failed to extract system image from ${airootfs_path}"
+		fi
 
-    log "Copying kernel to /mnt/boot..."
-    local kernel_source="/rengeos-reborn/kernel/vmlinuz-${KERNEL_NAME}"
-    
-    if [[ ! -f "${kernel_source}" ]]; then
-        error "Kernel not found at ${kernel_source}"
-    fi
-    
-    if ! cp -f "${kernel_source}" /mnt/boot/; then
-        error "Failed to copy kernel from ${kernel_source}"
-    fi
-    
-    log "Kernel copied successfully from ${kernel_source}"
+		log "System extracted successfully to /mnt"
 
-    if [[ -d /mnt/boot_temp ]] && [[ -n "$(ls -A /mnt/boot_temp 2>/dev/null)" ]]; then
-        cp -a /mnt/boot_temp/* /mnt/boot/ 2>/dev/null || {
-            log "Warning: Could not copy all files from boot_temp, continuing..."
-        }
-    fi
-    rm -rf /mnt/boot_temp 2>/dev/null || true
+		echo "50"
+		sleep 1
+		echo "XXX"
+		echo "Preparing boot partition..."
+		echo "XXX"
 
-    echo "80"
-    sleep 1
-    echo "XXX"
-    echo "Generating fstab..."
-    echo "XXX"
+		log "Handling /boot directory..."
 
-    log "Generating fstab with genfstab..."
-    genfstab -U /mnt >>/mnt/etc/fstab || error "Failed to generate fstab"
+		if [[ -d /mnt/boot ]] && [[ -n "$(ls -A /mnt/boot 2>/dev/null)" ]]; then
+			mkdir -p /mnt/boot_temp
+			mv /mnt/boot/* /mnt/boot_temp/ 2>/dev/null || {
+				log "Warning: Could not move existing boot files, continuing..."
+			}
+		else
+			mkdir -p /mnt/boot
+			mkdir -p /mnt/boot_temp
+		fi
 
-    log "Optimizing fstab entries..."
-    
-    local root_uuid boot_uuid
-    root_uuid=$(blkid -s UUID -o value "${ROOT_PART}")
-    boot_uuid=$(blkid -s UUID -o value "${BOOT_PART}")
+		log "Mounting ${BOOT_PART} to /mnt/boot..."
 
-    cp /mnt/etc/fstab /mnt/etc/fstab.bak 2>/dev/null || true
+		if [[ "${BOOT_MODE}" == "UEFI" ]]; then
+			if ! mount -t vfat -o defaults,utf8,dmask=0022,fmask=0133 "${BOOT_PART}" /mnt/boot; then
+				error "Failed to mount FAT32 boot partition"
+			fi
+		else
+			if ! mount -t xfs -o noatime,nodiratime,logbufs=8,logbsize=256k "${BOOT_PART}" /mnt/boot; then
+				error "Failed to mount XFS boot partition"
+			fi
+		fi
 
-    cat >/mnt/etc/fstab <<FSTAB_EOF
+		log "Copying kernel to /mnt/boot..."
+		local kernel_source="/rengeos-reborn/kernel/vmlinuz-${KERNEL_NAME}"
+
+		if [[ ! -f "${kernel_source}" ]]; then
+			error "Kernel not found at ${kernel_source}"
+		fi
+
+		if ! cp -f "${kernel_source}" /mnt/boot/; then
+			error "Failed to copy kernel from ${kernel_source}"
+		fi
+
+		log "Kernel copied successfully from ${kernel_source}"
+
+		if [[ -d /mnt/boot_temp ]] && [[ -n "$(ls -A /mnt/boot_temp 2>/dev/null)" ]]; then
+			cp -a /mnt/boot_temp/* /mnt/boot/ 2>/dev/null || {
+				log "Warning: Could not copy all files from boot_temp, continuing..."
+			}
+		fi
+		rm -rf /mnt/boot_temp 2>/dev/null || true
+
+		echo "80"
+		sleep 1
+		echo "XXX"
+		echo "Generating fstab..."
+		echo "XXX"
+
+		log "Generating fstab with genfstab..."
+		genfstab -U /mnt >>/mnt/etc/fstab || error "Failed to generate fstab"
+
+		log "Optimizing fstab entries..."
+
+		local root_uuid boot_uuid
+		root_uuid=$(blkid -s UUID -o value "${ROOT_PART}")
+		boot_uuid=$(blkid -s UUID -o value "${BOOT_PART}")
+
+		cp /mnt/etc/fstab /mnt/etc/fstab.bak 2>/dev/null || true
+
+		cat >/mnt/etc/fstab <<FSTAB_EOF
 # /etc/fstab: static file system information
 # <file system> <mount point> <type> <options> <dump> <pass>
 
@@ -885,53 +885,53 @@ UUID=${root_uuid} / ${ROOT_FS} noatime,discard 0 0
 
 FSTAB_EOF
 
-    if [[ "${BOOT_MODE}" == "UEFI" ]]; then
-        cat >>/mnt/etc/fstab <<FSTAB_EOF
+		if [[ "${BOOT_MODE}" == "UEFI" ]]; then
+			cat >>/mnt/etc/fstab <<FSTAB_EOF
 # Boot partition - FAT32 EFI System Partition
 UUID=${boot_uuid} /boot vfat defaults,utf8,dmask=0022,fmask=0133 0 2
 
 FSTAB_EOF
-    else
-        cat >>/mnt/etc/fstab <<FSTAB_EOF
+		else
+			cat >>/mnt/etc/fstab <<FSTAB_EOF
 # Boot partition - XFS optimized
 UUID=${boot_uuid} /boot xfs noatime,nodiratime,logbufs=8,logbsize=256k 0 2
 
 FSTAB_EOF
-    fi
+		fi
 
-    log "Fstab configuration complete"
+		log "Fstab configuration complete"
 
-    echo "90"
-    sleep 1
-    echo "XXX"
-    echo "Cleaning up unnecessary files..."
-    echo "XXX"
+		echo "90"
+		sleep 1
+		echo "XXX"
+		echo "Cleaning up unnecessary files..."
+		echo "XXX"
 
-    rm -rf /mnt/etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
-    rm -rf /mnt/etc/motd 2>/dev/null || true
-    rm -rf /mnt/etc/mkinitcpio.conf 2>/dev/null || true
+		rm -rf /mnt/etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+		rm -rf /mnt/etc/motd 2>/dev/null || true
+		rm -rf /mnt/etc/mkinitcpio.conf 2>/dev/null || true
 
-    echo "100"
-    echo "XXX"
-    echo "System extraction completed"
-    echo "XXX"
-    sleep 1
+		echo "100"
+		echo "XXX"
+		echo "System extraction completed"
+		echo "XXX"
+		sleep 1
 
-    ) | dialog --title "Step 2/4: System Installation" --gauge "Preparing system..." 10 70 0
+	) | dialog --title "Step 2/4: System Installation" --gauge "Preparing system..." 10 70 0
 
-    success "System installation completed"
+	success "System installation completed"
 }
 
 configure_system() {
-    (
-    echo "10"
-    echo "XXX"
-    echo "Creating configuration script..."
-    echo "XXX"
-    
-    log "Creating chroot configuration script..."
-    
-    cat >/mnt/setup.sh <<'CHROOT_EOF'
+	(
+		echo "10"
+		echo "XXX"
+		echo "Creating configuration script..."
+		echo "XXX"
+
+		log "Creating chroot configuration script..."
+
+		cat >/mnt/setup.sh <<'CHROOT_EOF'
 #!/bin/bash
 set -e
 
@@ -1185,130 +1185,130 @@ fi
 
 log "Configuration completed successfully!"
 CHROOT_EOF
-    
-    chmod +x /mnt/setup.sh
-    
-    echo "30"
-    sleep 1
-    echo "XXX"
-    echo "Executing configuration in chroot..."
-    echo "XXX"
-    
-    log "Executing configuration script..."
-    if ! env \
-        ROOT_PASSWORD="${ROOT_PASSWORD}" \
-        USER_PASSWORD="${USER_PASSWORD}" \
-        SETUP_TIMEZONE="${TIMEZONE}" \
-        SETUP_LOCALE="${LOCALE}" \
-        SETUP_HOSTNAME="${HOSTNAME}" \
-        SETUP_USERNAME="${USERNAME}" \
-        SETUP_KERNEL="${KERNEL_NAME}" \
-        SETUP_BOOTMODE="${BOOT_MODE}" \
-        SETUP_DISK="${DISK}" \
-        SETUP_ROOT_PART="${ROOT_PART}" \
-        SETUP_BOOT_PART="${BOOT_PART}" \
-        SETUP_RECOVERY_PART="${RECOVERY_PART}" \
-        SETUP_ENABLE_RECOVERY="${ENABLE_RECOVERY}" \
-        SETUP_ZRAM="${ENABLE_ZRAM}" \
-        SETUP_ROOT_FS="${ROOT_FS}" \
-        OTHER_KERNELS="${OTHER_KERNELS}" \
-        arch-chroot /mnt /setup.sh 2>&1 | tee -a "${LOG_FILE}"; then
-        error "Failed to configure system"
-    fi
-    
-    rm -f /mnt/setup.sh
-    
-    unset ROOT_PASSWORD USER_PASSWORD
-    
-    echo "100"
-    echo "XXX"
-    echo "Configuration completed"
-    echo "XXX"
-    sleep 1
-    
-    ) | dialog --title "Step 3/4: System Configuration" --gauge "Configuring system..." 10 70 0
-    
-    success "System configuration completed"
+
+		chmod +x /mnt/setup.sh
+
+		echo "30"
+		sleep 1
+		echo "XXX"
+		echo "Executing configuration in chroot..."
+		echo "XXX"
+
+		log "Executing configuration script..."
+		if ! env \
+			ROOT_PASSWORD="${ROOT_PASSWORD}" \
+			USER_PASSWORD="${USER_PASSWORD}" \
+			SETUP_TIMEZONE="${TIMEZONE}" \
+			SETUP_LOCALE="${LOCALE}" \
+			SETUP_HOSTNAME="${HOSTNAME}" \
+			SETUP_USERNAME="${USERNAME}" \
+			SETUP_KERNEL="${KERNEL_NAME}" \
+			SETUP_BOOTMODE="${BOOT_MODE}" \
+			SETUP_DISK="${DISK}" \
+			SETUP_ROOT_PART="${ROOT_PART}" \
+			SETUP_BOOT_PART="${BOOT_PART}" \
+			SETUP_RECOVERY_PART="${RECOVERY_PART}" \
+			SETUP_ENABLE_RECOVERY="${ENABLE_RECOVERY}" \
+			SETUP_ZRAM="${ENABLE_ZRAM}" \
+			SETUP_ROOT_FS="${ROOT_FS}" \
+			OTHER_KERNELS="${OTHER_KERNELS}" \
+			arch-chroot /mnt /setup.sh 2>&1 | tee -a "${LOG_FILE}"; then
+			error "Failed to configure system"
+		fi
+
+		rm -f /mnt/setup.sh
+
+		unset ROOT_PASSWORD USER_PASSWORD
+
+		echo "100"
+		echo "XXX"
+		echo "Configuration completed"
+		echo "XXX"
+		sleep 1
+
+	) | dialog --title "Step 3/4: System Configuration" --gauge "Configuring system..." 10 70 0
+
+	success "System configuration completed"
 }
 
 finalize_installation() {
-    (
-    echo "10"
-    echo "XXX"
-    echo "Performing final checks..."
-    echo "XXX"
-    
-    log "Running final verification..."
-    
-    local check_failed=0
-    
-    if [[ ! -f "/mnt/boot/vmlinuz-${KERNEL_NAME}" ]]; then
-        warning "Kernel missing"
-        check_failed=1
-    fi
-    
-    if [[ ! -f "/mnt/boot/grub/grub.cfg" ]]; then
-        warning "GRUB config missing"
-        check_failed=1
-    fi
-    
-    if [[ ${check_failed} -eq 1 ]]; then
-        error "Final verification failed!"
-    fi
-    
-    echo "50"
-    echo "XXX"
-    echo "Unmounting partitions..."
-    echo "XXX"
-    
-    log "Syncing filesystems..."
-    sync
-    sleep 2
-    
-    log "Unmounting boot partition..."
-    if mountpoint -q /mnt/boot; then
-        umount /mnt/boot || {
-            log "Warning: Could not unmount /mnt/boot, trying lazy unmount..."
-            umount -l /mnt/boot 2>/dev/null || true
-        }
-    fi
-    
-    log "Unmounting root partition..."
-    if mountpoint -q /mnt; then
-        umount /mnt || {
-            log "Warning: Could not unmount /mnt, trying lazy unmount..."
-            umount -l /mnt 2>/dev/null || true
-        }
-    fi
-    
-    echo "100"
-    echo "XXX"
-    echo "Installation complete!"
-    echo "XXX"
-    sleep 1
-    
-    ) | dialog --title "Step 4/4: Finalization" --gauge "Finalizing..." 10 70 0
-    
-    success "Installation completed successfully!"
+	(
+		echo "10"
+		echo "XXX"
+		echo "Performing final checks..."
+		echo "XXX"
+
+		log "Running final verification..."
+
+		local check_failed=0
+
+		if [[ ! -f "/mnt/boot/vmlinuz-${KERNEL_NAME}" ]]; then
+			warning "Kernel missing"
+			check_failed=1
+		fi
+
+		if [[ ! -f "/mnt/boot/grub/grub.cfg" ]]; then
+			warning "GRUB config missing"
+			check_failed=1
+		fi
+
+		if [[ ${check_failed} -eq 1 ]]; then
+			error "Final verification failed!"
+		fi
+
+		echo "50"
+		echo "XXX"
+		echo "Unmounting partitions..."
+		echo "XXX"
+
+		log "Syncing filesystems..."
+		sync
+		sleep 2
+
+		log "Unmounting boot partition..."
+		if mountpoint -q /mnt/boot; then
+			umount /mnt/boot || {
+				log "Warning: Could not unmount /mnt/boot, trying lazy unmount..."
+				umount -l /mnt/boot 2>/dev/null || true
+			}
+		fi
+
+		log "Unmounting root partition..."
+		if mountpoint -q /mnt; then
+			umount /mnt || {
+				log "Warning: Could not unmount /mnt, trying lazy unmount..."
+				umount -l /mnt 2>/dev/null || true
+			}
+		fi
+
+		echo "100"
+		echo "XXX"
+		echo "Installation complete!"
+		echo "XXX"
+		sleep 1
+
+	) | dialog --title "Step 4/4: Finalization" --gauge "Finalizing..." 10 70 0
+
+	success "Installation completed successfully!"
 }
 
 show_completion_message() {
-    local recovery_info=""
-    if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
-        recovery_info="\n  - Recovery: ${RECOVERY_PART} (registered in GRUB)"
-    fi
-    
-    local zram_info=""
-    if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
-        zram_info="\n  - Zram: Enabled (RAM/2, LZ4 compression)"
-    fi
-    
-    local other_kernels_info=""
-    if [[ -n "${OTHER_KERNELS}" ]]; then
-        other_kernels_info="\n  - Other kernels removed: ${OTHER_KERNELS}"
-    fi
-    
-    dialog --title "Installation Complete!" --msgbox "\
+	local recovery_info=""
+	if [[ "${ENABLE_RECOVERY}" == "yes" ]]; then
+		recovery_info="\n  - Recovery: ${RECOVERY_PART} (registered in GRUB)"
+	fi
+
+	local zram_info=""
+	if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
+		zram_info="\n  - Zram: Enabled (RAM/2, LZ4 compression)"
+	fi
+
+	local other_kernels_info=""
+	if [[ -n "${OTHER_KERNELS}" ]]; then
+		other_kernels_info="\n  - Other kernels removed: ${OTHER_KERNELS}"
+	fi
+
+	dialog --title "Installation Complete!" --msgbox "\
 RengeOS has been successfully reinstalled!\n\n\
 Installation Summary:\n\
   - Boot Mode: ${BOOT_MODE}\n\
@@ -1325,41 +1325,41 @@ Press OK to finish." 24 70
 }
 
 main() {
-    clear
-    
-    echo "========================================" >"${LOG_FILE}"
-    echo "RengeOS Reborn On Recovery Mode" >>"${LOG_FILE}"
-    echo "========================================" >>"${LOG_FILE}"
-    log "Installation started at $(date)"
-    
-    if [[ ${EUID} -ne 0 ]]; then
-        error "This script must be run as root"
-    fi
-    
-    check_dependencies
-    
-    show_welcome || exit 0
-    select_boot_mode
-    select_partitions
-    configure_system_locale
-    configure_user_settings
-    detect_kernel
-    configure_zram
-    show_configuration_summary
-    
-    dialog --title "FINAL WARNING" --defaultno --yesno "\
+	clear
+
+	echo "========================================" >"${LOG_FILE}"
+	echo "RengeOS Reborn On Recovery Mode" >>"${LOG_FILE}"
+	echo "========================================" >>"${LOG_FILE}"
+	log "Installation started at $(date)"
+
+	if [[ ${EUID} -ne 0 ]]; then
+		error "This script must be run as root"
+	fi
+
+	check_dependencies
+
+	show_welcome || exit 0
+	select_boot_mode
+	select_partitions
+	configure_system_locale
+	configure_user_settings
+	detect_kernel
+	configure_zram
+	show_configuration_summary
+
+	dialog --title "FINAL WARNING" --defaultno --yesno "\
 This is your LAST CHANCE to cancel!\n\n\
 Selected partitions will be FORMATTED:\n\
   Boot/EFI: ${BOOT_PART}\n\
   Root: ${ROOT_PART}\n\n\
 ALL DATA on these partitions will be LOST!\n\n\
 Continue?" 14 55 || exit 0
-    
-    format_partitions
-    mount_and_extract
-    configure_system
-    finalize_installation
-    show_completion_message
+
+	format_partitions
+	mount_and_extract
+	configure_system
+	finalize_installation
+	show_completion_message
 }
 
 trap 'error "Script failed at line ${LINENO}"' ERR
