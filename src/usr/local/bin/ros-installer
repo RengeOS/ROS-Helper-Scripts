@@ -29,6 +29,7 @@ KERNELS_TO_REMOVE=()
 ROOT_PASSWORD=""
 USER_PASSWORD=""
 ENABLE_ZRAM="no"
+MANUAL_PARTITIONING="no"
 
 log() {
 	echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -63,7 +64,7 @@ cleanup_on_error() {
 }
 
 check_dependencies() {
-	local deps=("dialog" "gdisk" "fdisk" "sfdisk" "unsquashfs" "arch-chroot" "genfstab" "grub-install" "bcachefs" "mkfs.xfs" "mkfs.vfat")
+	local deps=("dialog" "gdisk" "fdisk" "sfdisk" "unsquashfs" "arch-chroot" "genfstab" "grub-install" "bcachefs" "mkfs.xfs" "mkfs.vfat" "cfdisk" "lsblk" "blkid")
 	local missing=()
 
 	for cmd in "${deps[@]}"; do
@@ -87,6 +88,273 @@ detect_boot_mode() {
 		BOOT_FS="xfs"
 		info "Boot mode detected: Legacy BIOS (will use XFS for /boot)"
 	fi
+}
+
+# New function to prompt for manual partitioning
+prompt_manual_partitioning() {
+	log "Prompting user for manual partitioning preference..."
+
+	if dialog --title "Partitioning Method" --yesno "\
+Do you want to manually partition the disk?\n\n\
+If you choose YES, you will use cfdisk to create partitions manually.\n\
+If you choose NO, the installer will automatically partition the disk.\n\n\
+Note: Manual partitioning gives you full control over partition layout." 13 70; then
+		MANUAL_PARTITIONING="yes"
+		log "User selected manual partitioning"
+
+		# Show partition requirements notice
+		dialog --title "Manual Partitioning Requirements" --yesno "\
+Manual Partitioning Requirements:\n\n\
+- Boot partition (/boot) needs 1G or more\n\
+- Recovery partition (optional) needs 7GB or more\n\
+- Root partition (/) will use remaining space\n\n\
+WARNING: Below recommended sizes may cause low disk space errors!\n\n\
+Next, we will use cfdisk on ${DISK}\n\n\
+Continue to cfdisk?" 15 70 || exit 0
+
+		# Run cfdisk for manual partitioning
+		log "Launching cfdisk for manual partitioning on $DISK"
+		cfdisk "$DISK"
+
+		# Scan for partitions after cfdisk
+		log "Scanning for partitions on $DISK after cfdisk"
+		partprobe "$DISK" 2>/dev/null || true
+		sleep 2
+
+		# List available partitions
+		local partitions=()
+		local part_info=$(lsblk -n -l -o NAME,TYPE,SIZE,PARTLABEL "$DISK" | grep part)
+
+		if [ -z "$part_info" ]; then
+			error "No partitions found on $DISK after cfdisk. Please create partitions and try again."
+		fi
+
+		# Create partition selection menu
+		local part_menu=()
+		while IFS= read -r line; do
+			local part_name=$(echo "$line" | awk '{print $1}')
+			local part_size=$(echo "$line" | awk '{print $3}')
+			local part_label=$(echo "$line" | awk '{$1=$2=$3=""; print $0}' | xargs)
+			local display_info="$part_size"
+
+			if [ -n "$part_label" ]; then
+				display_info="$display_info ($part_label)"
+			fi
+
+			part_menu+=("$part_name" "$display_info")
+		done <<<"$part_info"
+
+		# Select boot partition
+		BOOT_PART=$(dialog --title "Select Boot Partition" --menu "\
+Select the partition for /boot:\n\n\
+Boot Mode: $BOOT_MODE\n\
+Minimum: 1G recommended\n\
+Filesystem: $BOOT_FS" 17 70 10 "${part_menu[@]}" 3>&1 1>&2 2>&3) || exit 0
+
+		BOOT_PART="/dev/$BOOT_PART"
+		log "User selected boot partition: $BOOT_PART"
+
+		# Remove selected boot partition from menu
+		local root_menu=()
+		while IFS= read -r line; do
+			local part_name=$(echo "$line" | awk '{print $1}')
+			local part_dev="/dev/$part_name"
+
+			if [ "$part_dev" != "$BOOT_PART" ]; then
+				local part_size=$(echo "$line" | awk '{print $3}')
+				local part_label=$(echo "$line" | awk '{$1=$2=$3=""; print $0}' | xargs)
+				local display_info="$part_size"
+
+				if [ -n "$part_label" ]; then
+					display_info="$display_info ($part_label)"
+				fi
+
+				root_menu+=("$part_name" "$display_info")
+			fi
+		done <<<"$part_info"
+
+		# Select root partition
+		ROOT_PART=$(dialog --title "Select Root Partition" --menu "\
+Select the partition for / (root):\n\n\
+Root Filesystem: $ROOT_FSTYPE\n\
+Should have sufficient space for system and applications" 15 70 10 "${root_menu[@]}" 3>&1 1>&2 2>&3) || exit 0
+
+		ROOT_PART="/dev/$ROOT_PART"
+		log "User selected root partition: $ROOT_PART"
+
+		# Ask about recovery partition
+		if dialog --title "Recovery Partition" --yesno "\
+Do you want to select a partition for Recovery Mode?\n\n\
+Recovery Mode provides emergency rescue system.\n\
+Minimum: 7G recommended\n\
+Filesystem: XFS (GRUB-compatible)" 12 70; then
+			ENABLE_RECOVERY="yes"
+
+			# Remove selected partitions from menu
+			local recovery_menu=()
+			while IFS= read -r line; do
+				local part_name=$(echo "$line" | awk '{print $1}')
+				local part_dev="/dev/$part_name"
+
+				if [ "$part_dev" != "$BOOT_PART" ] && [ "$part_dev" != "$ROOT_PART" ]; then
+					local part_size=$(echo "$line" | awk '{print $3}')
+					local part_label=$(echo "$line" | awk '{$1=$2=$3=""; print $0}' | xargs)
+					local display_info="$part_size"
+
+					if [ -n "$part_label" ]; then
+						display_info="$display_info ($part_label)"
+					fi
+
+					recovery_menu+=("$part_name" "$display_info")
+				fi
+			done <<<"$part_info"
+
+			if [ ${#recovery_menu[@]} -eq 0 ]; then
+				warning "No available partitions for recovery"
+				ENABLE_RECOVERY="no"
+				RECOVERY_PART=""
+			else
+				RECOVERY_PART=$(dialog --title "Select Recovery Partition" --menu "\
+Select the partition for /recovery:\n\n\
+Will be used for emergency rescue system.\n\
+Minimum: 7G recommended" 14 70 10 "${recovery_menu[@]}" 3>&1 1>&2 2>&3) || exit 0
+
+				RECOVERY_PART="/dev/$RECOVERY_PART"
+				log "User selected recovery partition: $RECOVERY_PART"
+			fi
+		else
+			ENABLE_RECOVERY="no"
+			RECOVERY_PART=""
+			log "User chose not to select recovery partition"
+		fi
+
+		# Get actual partition sizes for summary
+		BOOT_SIZE=$(lsblk -n -o SIZE "$BOOT_PART" 2>/dev/null || echo "1G")
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
+			RECOVERY_SIZE=$(lsblk -n -o SIZE "$RECOVERY_PART" 2>/dev/null || echo "7G")
+		fi
+
+		log "Manual partitioning completed:"
+		log "  Boot: $BOOT_PART ($BOOT_SIZE)"
+		log "  Root: $ROOT_PART"
+		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+			log "  Recovery: $RECOVERY_PART ($RECOVERY_SIZE)"
+		fi
+
+	else
+		MANUAL_PARTITIONING="no"
+		log "User selected automatic partitioning"
+	fi
+}
+
+# New function to format manually selected partitions
+format_manual_partitions() {
+	log "Formatting manually selected partitions..."
+
+	(
+		echo "10"
+		echo "XXX"
+		echo "Formatting boot partition with $BOOT_FS..."
+		echo "XXX"
+
+		log "Formatting $BOOT_PART as $BOOT_FS..."
+		wipefs -af "$BOOT_PART" >/dev/null 2>&1 || true
+		sleep 2
+
+		if [ "$BOOT_MODE" = "UEFI" ]; then
+			if ! mkfs.vfat -F 32 -n "RengeOS_EFI" "$BOOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+				error "Failed to format boot partition with FAT32"
+			fi
+			log "FAT32 EFI System Partition formatted successfully"
+		else
+			if ! mkfs.xfs -f \
+				-i size=512 \
+				-n size=4096 \
+				-d agcount=4 \
+				-l size=64m \
+				-m crc=1 \
+				-L RengeOS_Boot \
+				"$BOOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+				error "Failed to format boot partition with XFS"
+			fi
+			log "XFS boot partition formatted successfully"
+		fi
+
+		echo "30"
+		sleep 1
+
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
+			echo "XXX"
+			echo "Formatting recovery partition with XFS..."
+			echo "XXX"
+
+			log "Formatting recovery partition $RECOVERY_PART with XFS..."
+			wipefs -af "$RECOVERY_PART" >/dev/null 2>&1 || true
+			sleep 2
+
+			if ! mkfs.xfs -f \
+				-i size=512 \
+				-n size=4096 \
+				-d agcount=4 \
+				-l size=64m \
+				-m crc=1,finobt=1,rmapbt=0,reflink=0 \
+				-L ROS_Recovery \
+				"$RECOVERY_PART" 2>&1 | tee -a "$LOG_FILE"; then
+				error "Failed to format recovery partition with XFS"
+			fi
+			log "XFS recovery partition formatted successfully"
+
+			echo "50"
+			sleep 1
+		else
+			echo "50"
+			sleep 1
+		fi
+
+		echo "XXX"
+		echo "Formatting root partition with $ROOT_FSTYPE..."
+		echo "XXX"
+
+		log "Formatting $ROOT_PART with $ROOT_FSTYPE..."
+		wipefs -af "$ROOT_PART" >/dev/null 2>&1 || true
+		sleep 2
+
+		if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+			if ! bcachefs format \
+				--force \
+				--compression=lz4 \
+				--background_compression=lz4 \
+				--metadata_replicas=1 \
+				--data_replicas=1 \
+				--acl \
+				--label=RengeOS_Root \
+				"$ROOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+				error "Failed to format root partition with Bcachefs"
+			fi
+			log "Bcachefs root partition formatted successfully"
+		else
+			if ! mkfs.xfs -f \
+				-i size=512 \
+				-n size=4096 \
+				-d agcount=4 \
+				-l size=64m \
+				-m crc=1,finobt=1 \
+				-L RengeOS_Root \
+				"$ROOT_PART" 2>&1 | tee -a "$LOG_FILE"; then
+				error "Failed to format root partition with XFS"
+			fi
+			log "XFS root partition formatted successfully"
+		fi
+
+		echo "100"
+		echo "XXX"
+		echo "Partition formatting completed"
+		echo "XXX"
+		sleep 1
+
+	) | dialog --title "Formatting Manual Partitions" --gauge "Formatting selected partitions..." 10 70 0
+
+	success "Manual partition formatting completed"
 }
 
 detect_kernel() {
@@ -663,21 +931,27 @@ show_configuration_summary() {
 
 	local partition_layout="  Boot: $BOOT_PART ($boot_fs_display, $BOOT_SIZE)"
 
-	if [ "$ENABLE_RECOVERY" = "yes" ]; then
+	if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 		partition_layout="${partition_layout}\n  Recovery: $RECOVERY_PART (XFS, $RECOVERY_SIZE)\n  Root: $ROOT_PART ($root_fs_display, remaining)"
 	else
 		partition_layout="${partition_layout}\n  Root: $ROOT_PART ($root_fs_display, remaining)"
 	fi
 
 	local recovery_status="Disabled"
-	if [ "$ENABLE_RECOVERY" = "yes" ]; then
+	if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 		recovery_status="Enabled ($RECOVERY_SIZE)"
+	fi
+
+	local partitioning_method="Automatic"
+	if [ "$MANUAL_PARTITIONING" = "yes" ]; then
+		partitioning_method="Manual (cfdisk)"
 	fi
 
 	dialog --title "Configuration Summary" --yesno "\
 Please review your configuration:\n\n\
 DISK CONFIGURATION:\n\
   Disk: $DISK\n\
+  Partitioning: $partitioning_method\n\
   Boot Mode: $BOOT_MODE\n\
   Filesystems:\n\
     - Boot: $boot_fs_display (optimized for $BOOT_MODE)\n\
@@ -692,7 +966,7 @@ SYSTEM CONFIGURATION:\n\
   Locale:   $LOCALE\n\
   Kernel:   $KERNEL_NAME\n\n\
 WARNING: ALL DATA on $DISK will be ERASED!\n\n\
-Continue with installation?" 30 70
+Continue with installation?" 32 70
 }
 
 partition_disk() {
@@ -820,7 +1094,7 @@ EOF
 
 		sleep 1
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			echo "60"
 			sleep 1
 			echo "XXX"
@@ -1005,7 +1279,7 @@ mount_and_extract() {
 			fi
 		fi
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			echo "50"
 			sleep 1
 			echo "XXX"
@@ -1133,7 +1407,7 @@ mount_and_extract() {
 		root_uuid=$(blkid -s UUID -o value "$ROOT_PART")
 		boot_uuid=$(blkid -s UUID -o value "$BOOT_PART")
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
 		fi
 
@@ -1173,7 +1447,7 @@ UUID=$boot_uuid /boot xfs noatime,nodiratime,logbufs=8,logbsize=256k 0 2
 FSTAB_EOF
 		fi
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
 
 			cat >>/mnt/etc/fstab <<FSTAB_EOF
@@ -1213,7 +1487,7 @@ configure_system() {
 	local enable_zram="$ENABLE_ZRAM"
 	local recovery_uuid=""
 
-	if [ "$ENABLE_RECOVERY" = "yes" ]; then
+	if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 		recovery_uuid=$(blkid -s UUID -o value "$RECOVERY_PART")
 		log "Recovery partition UUID: $recovery_uuid"
 	fi
@@ -1226,7 +1500,7 @@ configure_system() {
 
 		log "Creating chroot configuration script..."
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			echo "15"
 			sleep 1
 			echo "XXX"
@@ -1587,7 +1861,7 @@ if ! grep -q "GRUB_DISABLE_OS_PROBER" /etc/default/grub; then
     echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
 fi
 
-if [ "$ENABLE_RECOVERY" = "yes" ]; then
+if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_UUID" ]; then
     log "Adding Recovery Mode entry to GRUB..."
 
     cat > /etc/grub.d/40_custom <<EOF
@@ -1692,7 +1966,7 @@ finalize_installation() {
 			check_failed=1
 		fi
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			if [ ! -f /mnt/recovery/boot/vmlinuz-${KERNEL_NAME} ]; then
 				warning "Recovery kernel missing"
 				check_failed=1
@@ -1712,7 +1986,7 @@ finalize_installation() {
 		sync
 		sleep 3
 
-		if [ "$ENABLE_RECOVERY" = "yes" ]; then
+		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 			log "Unmounting recovery partition..."
 			if mountpoint -q /mnt/recovery; then
 				umount /mnt/recovery || umount -l /mnt/recovery 2>/dev/null || true
@@ -1742,7 +2016,7 @@ finalize_installation() {
 
 show_completion_message() {
 	local recovery_info=""
-	if [ "$ENABLE_RECOVERY" = "yes" ]; then
+	if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
 		recovery_info="\nRecovery Mode: ENABLED\n  - Access via GRUB menu: 'Recovery Mode'\n  - Boots to root shell for emergency rescue"
 	else
 		recovery_info="\nRecovery Mode: Not configured"
@@ -1755,6 +2029,11 @@ show_completion_message() {
 		zram_info="\nZram: Disabled"
 	fi
 
+	local partitioning_method="Automatic"
+	if [ "$MANUAL_PARTITIONING" = "yes" ]; then
+		partitioning_method="Manual (cfdisk)"
+	fi
+
 	local fs_info="Root filesystem: $ROOT_FSTYPE"
 	if [ "$ROOT_FSTYPE" = "xfs" ]; then
 		fs_info="$fs_info (LZ4 optimized)"
@@ -1765,6 +2044,7 @@ show_completion_message() {
 	dialog --title "Installation Complete!" --msgbox "\
 RengeOS has been successfully installed!\n\n\
 Installation Summary:\n\
+  - Partitioning: $partitioning_method\n\
   - Boot Mode: $BOOT_MODE\n\
   - Disk: $DISK\n\
   - Hostname: $HOSTNAME\n\
@@ -1776,7 +2056,7 @@ What's next:\n\
   2. Reboot your system\n\
   3. Enjoy RengeOS!\n\n\
 Log file: $LOG_FILE\n\n\
-Press OK to finish." 28 70
+Press OK to finish." 30 70
 }
 
 main() {
@@ -1796,9 +2076,17 @@ main() {
 
 	show_welcome || exit 0
 	select_disk
-	configure_boot_size
-	configure_recovery_mode
-	assign_partition_vars
+
+	# Ask about manual partitioning
+	prompt_manual_partitioning
+
+	if [ "$MANUAL_PARTITIONING" = "no" ]; then
+		# Automatic partitioning flow
+		configure_boot_size
+		configure_recovery_mode
+		assign_partition_vars
+	fi
+
 	detect_kernel
 	configure_zram
 	select_timezone
@@ -1813,7 +2101,14 @@ This is your LAST CHANCE to cancel!\n\n\
 Disk: $DISK will be COMPLETELY ERASED!\n\n\
 Continue?" 10 50 || exit 0
 
-	partition_disk
+	if [ "$MANUAL_PARTITIONING" = "yes" ]; then
+		# Format manually selected partitions
+		format_manual_partitions
+	else
+		# Automatic partitioning
+		partition_disk
+	fi
+
 	mount_and_extract
 	configure_system
 	finalize_installation
