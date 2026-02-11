@@ -456,7 +456,7 @@ Select root filesystem type:\n\n\
 Kernel: $KERNEL_NAME\n\n\
 Choose the filesystem for your root partition:" 15 70 2 \
 		"1" "Bcachefs (Modern, LZ4 compression, Copy-on-Write)" \
-		"2" "XFS (Stable, High performance, LZ4 support)" \
+		"2" "XFS (Stable, High performance)" \
 		3>&1 1>&2 2>&3)
 
 	if [ $? -ne 0 ]; then
@@ -717,20 +717,8 @@ show_welcome() {
 
 	dialog --title "RengeOS Installer" --msgbox "\
 Welcome to RengeOS Installation Script!\n\n\
-This interactive installer will guide you through:\n\
-  - Disk partitioning\n\
-  - System installation with optimized boot partition\n\
-  - Optional Recovery Mode partition\n\
-  - User configuration\n\
-  - Bootloader setup\n\n\
+This interactive installer will guide you through the configuration steps for RengeOS before it's installed on your system, and it happens automatically, so please relax :)\n\n\
 $fs_layout\n\n\
-Performance OPTIMIZATIONS:\n\
-  - LZ4 compression (fast, ~60% compression ratio)\n\
-  - NoAtime mount (reduced disk I/O)\n\
-  - TRIM/Discard for SSD performance\n\
-  - Transparent hugepages optimized\n\
-  - Split lock detection disabled\n\n\
-NEW: Recovery Mode for system rescue!\n\n\
 WARNING: All data on selected disk will be ERASED!\n\n\
 Press OK to continue or Cancel to exit." 38 75
 }
