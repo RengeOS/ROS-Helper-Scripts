@@ -579,21 +579,31 @@ Use arrow keys to navigate, Enter to select." 20 60 12 "${cities[@]}" 3>&1 1>&2 
 }
 
 select_locale() {
-	local locales=(
-		"en_US.UTF-8" "English (US)"
-		"en_GB.UTF-8" "English (UK)"
-		"vi_VN.UTF-8" "Vietnamese"
-		"ja_JP.UTF-8" "Japanese"
-		"zh_CN.UTF-8" "Chinese (Simplified)"
-	)
-
-	LOCALE=$(dialog --title "Locale Selection" --menu "\
-Select system locale:" 15 60 6 "${locales[@]}" 3>&1 1>&2 2>&3)
-
-	if [ $? -ne 0 ]; then
-		exit 0
+	local locales=()
+	local locale_list=()
+	
+	while IFS= read -r line; do
+		[[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*#[[:space:]]*$ ]] && continue
+		line=$(echo "$line" | sed 's/^[[:space:]]*#[[:space:]]*//')
+		locale_name=$(echo "$line" | awk '{print $1}')
+		[[ -n "$locale_name" ]] && locale_list+=("$locale_name")
+	done < <(grep -E "^#?[a-zA-Z]" /etc/locale.gen)
+	
+	locale_list=($(printf '%s\n' "${locale_list[@]}" | sort -u | sort -t_ -k1,1))
+	
+	for loc in "${locale_list[@]}"; do
+		locales+=("$loc" "")
+	done
+	
+	if [ ${#locales[@]} -eq 0 ]; then
+		dialog --title "Error" --msgbox "No locales found in /etc/locale.gen" 10 50
+		exit 1
 	fi
-
+	
+	LOCALE=$(dialog --title "Locale Selection" --menu "Select system locale:" 25 50 18 "${locales[@]}" 3>&1 1>&2 2>&3)
+	
+	[ $? -ne 0 ] && exit 0
+	
 	log "Selected locale: $LOCALE"
 }
 
