@@ -712,23 +712,9 @@ set_passwords() {
 }
 
 show_welcome() {
-	local fs_layout=""
-	if [ "$ROOT_FSTYPE" = "xfs" ]; then
-		fs_layout="XFS Root Filesystem Mode:\n\
-  - /boot: FAT32 (UEFI) or XFS (Legacy)\n\
-  - /recovery: XFS (optional)\n\
-  - /: XFS with LZ4 compression and high-performance flags"
-	else
-		fs_layout="Bcachefs Root Filesystem Mode:\n\
-  - /boot: FAT32 (UEFI) or XFS (Legacy)\n\
-  - /recovery: XFS (optional)\n\
-  - /: Bcachefs with LZ4 compression"
-	fi
-
 	dialog --title "RengeOS Installer" --msgbox "\
 Welcome to RengeOS Installation Script!\n\n\
 This interactive installer will guide you through the configuration steps for RengeOS before it's installed on your system, and it happens automatically, so please relax :)\n\n\
-$fs_layout\n\n\
 WARNING: All data on selected disk will be ERASED!\n\n\
 Press OK to continue or Cancel to exit." 38 75
 }
@@ -1737,9 +1723,9 @@ log "Configuring mkinitcpio hooks for $ROOT_FSTYPE..."
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
 
 if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
-    sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+    sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress)/' /etc/mkinitcpio.conf
 else
-    sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress lz4hc lz4hc_compress)/' /etc/mkinitcpio.conf
+    sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress)/' /etc/mkinitcpio.conf
 fi
 
 log "Creating kernel preset for $KERNEL_NAME..."
@@ -1753,10 +1739,8 @@ fi
 cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="\$(ls /usr/lib/modules | grep $KERNEL_NAME)"
-PRESETS=('default' 'fallback')
+PRESETS=('default')
 default_image="/boot/initramfs-$KERNEL_NAME.img"
-fallback_image="/boot/initramfs-$KERNEL_NAME-fallback.img"
-fallback_options="-S autodetect"
 EOF
 
 log "Generating initramfs..."
