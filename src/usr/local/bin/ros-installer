@@ -1551,7 +1551,7 @@ grep "^MODULES=" /etc/mkinitcpio.conf
 grep "^HOOKS=" /etc/mkinitcpio.conf
 
 log "Creating kernel preset for recovery $KERNEL_NAME..."
-KVER=$(ls /usr/lib/modules | grep "$KERNEL_NAME" | head -n1)
+KVER=$(ls /usr/lib/modules | grep "${KERNEL_NAME#linux-}" | head -n1)
 
 if [ -z "$KVER" ]; then
     echo "ERROR: Kernel $KERNEL_NAME not found in recovery"
@@ -1561,7 +1561,7 @@ fi
 
 cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="\$(ls /usr/lib/modules | grep $KERNEL_NAME)"
+ALL_kver="\$(ls /usr/lib/modules | grep ${KERNEL_NAME#linux-})"
 PRESETS=('default')
 default_image="/boot/initramfs-$KERNEL_NAME.img"
 EOF
@@ -1729,7 +1729,7 @@ else
 fi
 
 log "Creating kernel preset for $KERNEL_NAME..."
-KVER=$(ls /usr/lib/modules | grep "$KERNEL_NAME" | head -n1)
+KVER=$(ls /usr/lib/modules | grep "${KERNEL_NAME#linux-}" | head -n1)
 
 if [ -z "$KVER" ]; then
     echo "ERROR: Kernel $KERNEL_NAME not found"
@@ -1738,7 +1738,7 @@ fi
 
 cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="\$(ls /usr/lib/modules | grep $KERNEL_NAME)"
+ALL_kver="\$(ls /usr/lib/modules | grep ${KERNEL_NAME#linux-})"
 PRESETS=('default')
 default_image="/boot/initramfs-$KERNEL_NAME.img"
 EOF
