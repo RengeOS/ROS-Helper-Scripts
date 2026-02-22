@@ -1,4 +1,4 @@
-# Maintainer: Gia Phu <crystalforceix@gmail.com>
+# Maintainer: Le Nguyen Hoang Gia Phu <crystalforceix@gmail.com>
 pkgname="ros-helper-scripts"
 pkgver="1.0.0"
 pkgrel="1"
@@ -9,6 +9,7 @@ depends=(
   "dialog"
 )
 url="https://github.com/RengeOS/ROS-Helper-Scripts"
+license=('GPL3')
 package() {
 	install -d "${pkgdir}/usr/local/bin"
     install -Dm755 "${srcdir}/usr/local/bin/"* "${pkgdir}/usr/local/bin/"

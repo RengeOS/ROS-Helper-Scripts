@@ -1,5 +1,7 @@
 #!/bin/bash
 
+## Copyright (C) 2026 Le Nguyen Hoang Gia Phu <crystalforceix@gmail.com>
+
 set -eo pipefail
 
 RED='\033[0;31m'
