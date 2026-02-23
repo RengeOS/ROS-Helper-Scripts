@@ -4,16 +4,21 @@
 
 set -eo pipefail
 
+# Constants
+
 REBORN_DIR="/rengeos-reborn"
 TMP_DIR="${REBORN_DIR}/tmp"
 OS_RELEASE="/etc/os-release"
 TMP_OS_RELEASE="${TMP_DIR}/os-release"
 GITHUB_REPO="RengeOS/ROS-Reborn-System-OTA"
+PREFLIGHT_OS_RELEASE="/tmp/ros-reborn-preflight-os-release"
 LOG_FILE="/tmp/ros-reborn-system-ota.log"
 
-log() {
-	echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
+# Logging
+
+log()     { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+info()    { echo "[INFO] $*"    | tee -a "$LOG_FILE"; }
+success() { echo "[SUCCESS] $*" | tee -a "$LOG_FILE"; }
 
 error() {
 	echo "[ERROR] $*" | tee -a "$LOG_FILE"
@@ -21,29 +26,19 @@ error() {
 		dialog --title "Error" --msgbox "$*\n\nCheck log: $LOG_FILE" 12 70
 	fi
 	rm -rf "$TMP_DIR" 2>/dev/null || true
+	rm -f "$PREFLIGHT_OS_RELEASE" 2>/dev/null || true
 	exit 1
 }
 
-success() {
-	echo "[SUCCESS] $*" | tee -a "$LOG_FILE"
-}
-
-info() {
-	echo "[INFO] $*" | tee -a "$LOG_FILE"
-}
-
-log "ROS-Reborn-System-OTA started"
-log "Log file: $LOG_FILE"
+# Cleanup
 
 cleanup_on_exit() {
 	local exit_code=$?
 	log "Script exiting with code: $exit_code"
-
 	rm -f /tmp/download_progress_$$_*.fifo 2>/dev/null || true
-
+	rm -f "$PREFLIGHT_OS_RELEASE" 2>/dev/null || true
 	pkill -P $$ dialog 2>/dev/null || true
-
-	if [ $exit_code -ne 0 ]; then
+	if [[ $exit_code -ne 0 ]]; then
 		log "Script terminated with error - cleaning up temporary directory"
 		rm -rf "$TMP_DIR" 2>/dev/null || true
 	fi
@@ -51,10 +46,11 @@ cleanup_on_exit() {
 
 trap cleanup_on_exit EXIT INT TERM
 
+# Prerequisite checks
+
 check_root() {
 	log "Checking root privileges..."
-	if [ "$EUID" -ne 0 ]; then
-		log "ERROR: Script not running as root"
+	if [[ "$EUID" -ne 0 ]]; then
 		error "This script must be run as root"
 	fi
 	log "Root privileges confirmed"
@@ -71,65 +67,118 @@ check_requirements() {
 		fi
 	done
 
-	if [ ${#missing_tools[@]} -gt 0 ]; then
-		log "ERROR: Missing required tools: ${missing_tools[*]}"
+	if [[ ${#missing_tools[@]} -gt 0 ]]; then
 		error "Missing required tools: ${missing_tools[*]}\nPlease install: sudo pacman -S ${missing_tools[*]}"
 	fi
+
 	log "All required tools are available"
 }
 
-get_current_version() {
-	log "Reading current version from $OS_RELEASE"
-	if [ -f "$OS_RELEASE" ]; then
-		source "$OS_RELEASE"
-		log "Current version: ${IMAGE_VERSION:-Unknown}"
-		echo "${IMAGE_VERSION:-Unknown}"
-	else
-		log "WARNING: $OS_RELEASE not found"
-		echo "Unknown"
-	fi
+# Version helper
+# Reads IMAGE_VERSION from an os-release file without sourcing it.
+# Returns "Unknown" if the field is not found.
+
+get_version_from_file() {
+	local file="$1"
+	local version
+	version=$(grep '^IMAGE_VERSION=' "$file" 2>/dev/null | cut -d= -f2 | tr -d '"') || true
+	echo "${version:-Unknown}"
 }
 
-get_new_version() {
-	log "Reading new version from $TMP_OS_RELEASE"
-	if [ -f "$TMP_OS_RELEASE" ]; then
-		source "$TMP_OS_RELEASE"
-		log "New version: ${IMAGE_VERSION:-Unknown}"
-		echo "${IMAGE_VERSION:-Unknown}"
-	else
-		log "WARNING: $TMP_OS_RELEASE not found"
-		echo "Unknown"
+# Pre-flight fetch of os-release only
+
+fetch_preflight_os_release() {
+	log "Fetching os-release from latest release for version check..."
+	dialog --infobox "Fetching latest version info from GitHub..." 5 50
+	sleep 0.5
+
+	rm -f "$PREFLIGHT_OS_RELEASE"
+
+	# Resolve the direct download URL for os-release via the GitHub API
+	# to avoid depending on redirect behaviour in wget.
+	# Each grep is guarded with || true so a no-match does not abort under set -eo pipefail.
+	local api_json direct_url
+	api_json=$(wget -qO- --timeout=15 \
+		"https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>>"$LOG_FILE") || true
+
+	direct_url=$(echo "$api_json" \
+		| grep '"browser_download_url"' \
+		| grep 'os-release' \
+		| cut -d '"' -f4 \
+		| head -1) || true
+
+	if [[ -z "$direct_url" ]]; then
+		log "WARNING: os-release not listed in release assets, falling back to redirect URL"
+		direct_url="https://github.com/${GITHUB_REPO}/releases/latest/download/os-release"
 	fi
+
+	log "Downloading os-release from: $direct_url"
+
+	if ! wget -q --timeout=15 --max-redirect=5 "$direct_url" -O "$PREFLIGHT_OS_RELEASE" 2>>"$LOG_FILE"; then
+		rm -f "$PREFLIGHT_OS_RELEASE"
+		error "Failed to fetch version info from GitHub.\nPlease check your internet connection."
+	fi
+
+	if [[ ! -s "$PREFLIGHT_OS_RELEASE" ]]; then
+		rm -f "$PREFLIGHT_OS_RELEASE"
+		error "Downloaded os-release is empty. The release may not include this file."
+	fi
+
+	log "Preflight os-release saved to $PREFLIGHT_OS_RELEASE"
 }
+
+# Version comparison dialog
+# Shows only the two IMAGE_VERSION values (which are dates) side by side.
+
+show_version_confirm_dialog() {
+	local current_ver="$1"
+	local new_ver="$2"
+	local status="$3"
+
+	local status_line
+	case "$status" in
+		newer)   status_line="A newer version is available." ;;
+		older)   status_line="WARNING: The remote version is OLDER than your current version." ;;
+		unknown) status_line="Version comparison could not be determined." ;;
+	esac
+
+	local msg
+	printf -v msg \
+		'%s\n\n  %-16s %s\n  %-16s %s\n\n%s\n\nDo you want to download and apply this update?' \
+		"Version comparison:" \
+		"Current:" "$current_ver" \
+		"Latest:"  "$new_ver" \
+		"$status_line"
+
+	dialog --title "Confirm Update" --defaultno --yesno "$msg" 16 70
+}
+
+# Download all release files
 
 download_all_release_files() {
 	local tmp_dir="$1"
-
-	log "Downloading all files from release using GitHub API..."
+	log "Downloading all files from latest release..."
 	log "Target directory: $tmp_dir"
 
 	cd "$tmp_dir" || error "Failed to change to directory: $tmp_dir"
 
-	local download_urls
-	download_urls=$(wget -qO- "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep "browser_download_url" | cut -d '"' -f 4)
+	local api_json download_urls
+	api_json=$(wget -qO- "https://api.github.com/repos/${GITHUB_REPO}/releases/latest") || true
+	download_urls=$(echo "$api_json" \
+		| grep "browser_download_url" \
+		| cut -d '"' -f4) || true
 
-	if [ -z "$download_urls" ]; then
-		log "ERROR: No files found in the latest release"
+	if [[ -z "$download_urls" ]]; then
 		error "No files found in the latest release."
 	fi
 
 	local url_array=()
 	while IFS= read -r url; do
-		[ -n "$url" ] && url_array+=("$url")
+		[[ -n "$url" ]] && url_array+=("$url")
 	done <<<"$download_urls"
 
 	local total_files=${#url_array[@]}
-	log "Found $total_files files to download"
-
-	cleanup_pipes() {
-		rm -f /tmp/download_progress_$$_*.fifo 2>/dev/null || true
-	}
-	trap cleanup_pipes EXIT
+	log "Found $total_files file(s) to download"
 
 	local current_file=0
 	for download_url in "${url_array[@]}"; do
@@ -140,226 +189,217 @@ download_all_release_files() {
 
 		local fifo="/tmp/download_progress_$$_${current_file}.fifo"
 		rm -f "$fifo" 2>/dev/null || true
-		mkfifo "$fifo" || {
-			log "ERROR: Failed to create FIFO $fifo"
-			error "Failed to create progress pipe"
-		}
+		mkfifo "$fifo" || error "Failed to create progress pipe"
 
-		dialog --title "Downloading Files" --gauge "File: $filename ($current_file/$total_files)" 10 70 0 <"$fifo" &
+		dialog --title "Downloading Files" \
+			--gauge "File: $filename ($current_file/$total_files)" 10 70 0 <"$fifo" &
 		local dialog_pid=$!
 
 		exec 3>"$fifo"
 
 		local download_success=0
 		(
-			echo "0" >&3
-			echo "XXX" >&3
-			echo "Starting download: $filename" >&3
-			echo "XXX" >&3
+			echo "0"
+			echo "XXX"; echo "Starting download: $filename"; echo "XXX"
 
-			if wget --progress=bar:force "$download_url" -O "$filename" 2>&1 |
-				stdbuf -oL tr '\r' '\n' |
-				stdbuf -oL grep -oP '[0-9]+(?=%)' |
-				while read -r percent; do
-					echo "$percent" >&3
-					echo "XXX" >&3
-					echo "Downloading $filename ($current_file/$total_files) - ${percent}%" >&3
-					echo "XXX" >&3
+			if wget --progress=bar:force "$download_url" -O "$filename" 2>&1 \
+				| stdbuf -oL tr '\r' '\n' \
+				| stdbuf -oL grep -oP '[0-9]+(?=%)' \
+				| while read -r percent; do
+					echo "$percent"
+					echo "XXX"; echo "Downloading $filename ($current_file/$total_files) - ${percent}%"; echo "XXX"
 				done; then
-				echo "100" >&3
-				echo "XXX" >&3
-				echo "Download complete: $filename" >&3
-				echo "XXX" >&3
+				echo "100"
+				echo "XXX"; echo "Download complete: $filename"; echo "XXX"
 				sleep 0.5
 				exit 0
 			else
-				echo "0" >&3
-				echo "XXX" >&3
-				echo "Download failed: $filename" >&3
-				echo "XXX" >&3
+				echo "0"
+				echo "XXX"; echo "Download failed: $filename"; echo "XXX"
 				sleep 1
 				exit 1
 			fi
-		)
+		) >&3
 		download_success=$?
 
 		exec 3>&-
 		wait "$dialog_pid" 2>/dev/null || true
 		rm -f "$fifo"
 
-		if [ $download_success -ne 0 ] || [ ! -f "$filename" ]; then
-			log "ERROR: Failed to download: $filename"
+		if [[ $download_success -ne 0 ]] || [[ ! -f "$filename" ]]; then
 			error "Failed to download: $filename"
 		fi
 
 		log "Successfully downloaded: $filename ($(du -h "$filename" | cut -f1))"
 	done
 
-	trap - EXIT
-	cleanup_pipes
-
 	cd - >/dev/null || true
-	log "Download completed successfully"
+	log "All files downloaded successfully"
 }
 
-clear
-check_root
-check_requirements
+# Apply the update
 
-CURRENT_VERSION=$(get_current_version)
+apply_update() {
+	local current_version="$1"
+	local new_version="$2"
 
-log "Showing welcome dialog to user"
-dialog --title "ROS-Reborn-System-OTA" --msgbox "Essentially, this is a tool for updating the backup system before ros-reborn uses it on the main system.\n\nIt will update the ros-reborn backup system to the latest version of the RengeOS ISO. It can help you install the latest RengeOS system with ros-reborn, ensuring you always use the newest version from the RengeOS ISO build, instead of the older version as before.\n" 16 70
+	(
+		echo "10"; echo "XXX"; echo "Deleting old airootfs..."; echo "XXX"
+		log "Deleting old airootfs from ${REBORN_DIR}/airootfs/"
+		rm -rf "${REBORN_DIR}/airootfs/"*
+		log "Old airootfs deleted"
 
-log "Asking user confirmation to continue"
-if ! dialog --title "Confirm" --yesno "Do you want to continue updating to the latest version?\nThe backup system update will only work in recovery mode and will not affect your data, so you are safe." 8 60; then
-	log "User cancelled the update"
-	clear
-	echo "Update cancelled."
-	exit 0
-fi
+		echo "30"; echo "XXX"; echo "Deleting old kernel..."; echo "XXX"
+		log "Deleting old kernel from ${REBORN_DIR}/kernel/"
+		rm -rf "${REBORN_DIR}/kernel/"*
+		log "Old kernel deleted"
 
-log "User confirmed to continue"
-
-dialog --infobox "Downloading latest system files..." 5 50
-sleep 1
-
-log "Creating temporary directory: $TMP_DIR"
-dialog --infobox "Creating temporary directory..." 5 40
-rm -rf "$TMP_DIR" 2>/dev/null || true
-mkdir -p "$TMP_DIR" || error "Failed to create directory: $TMP_DIR"
-log "Temporary directory created"
-
-download_all_release_files "$TMP_DIR"
-
-NEW_VERSION=$(get_new_version)
-
-if [ "$NEW_VERSION" == "Unknown" ]; then
-	log "ERROR: Unable to determine new version from downloaded os-release"
-	rm -rf "$TMP_DIR"
-	error "Unable to determine new version from downloaded os-release file."
-fi
-
-log "New version determined: $NEW_VERSION"
-
-if [ "$CURRENT_VERSION" == "$NEW_VERSION" ]; then
-	log "System is already on the latest version: $NEW_VERSION"
-	dialog --title "Notice" --msgbox "System is already on the latest version: ${NEW_VERSION}" 8 60
-	rm -rf "$TMP_DIR"
-	clear
-	exit 0
-fi
-
-log "Update available: $CURRENT_VERSION -> $NEW_VERSION"
-
-log "Asking user for final confirmation"
-if ! dialog --title "Confirm Update" --defaultno --yesno "Do you want to delete the current ros-reborn system version (${CURRENT_VERSION}) and replace it with the latest RengeOS version (${NEW_VERSION})?" 16 70; then
-	log "User cancelled the final update confirmation"
-	clear
-	echo "Update cancelled."
-	rm -rf "$TMP_DIR"
-	exit 0
-fi
-
-log "User confirmed final update"
-log "Starting update process..."
-
-(
-	echo "10"
-	echo "XXX"
-	echo "Deleting old airootfs..."
-	echo "XXX"
-	log "Deleting old airootfs from ${REBORN_DIR}/airootfs/"
-	rm -rf "${REBORN_DIR}/airootfs/"*
-	log "Old airootfs deleted"
-
-	echo "30"
-	echo "XXX"
-	echo "Deleting old kernel..."
-	echo "XXX"
-	log "Deleting old kernel from ${REBORN_DIR}/kernel/"
-	rm -rf "${REBORN_DIR}/kernel/"*
-	log "Old kernel deleted"
-
-	echo "50"
-	echo "XXX"
-	echo "Copying new airootfs.sfs..."
-	echo "XXX"
-	log "Copying new airootfs.sfs"
-	if [ ! -d "${REBORN_DIR}/airootfs" ]; then
+		echo "50"; echo "XXX"; echo "Copying new airootfs.sfs..."; echo "XXX"
+		log "Copying new airootfs.sfs"
 		mkdir -p "${REBORN_DIR}/airootfs"
-		log "Created airootfs directory"
-	fi
-
-	airootfs_file=$(find "$TMP_DIR" -name "airootfs.sfs" -print -quit)
-	if [ -n "$airootfs_file" ]; then
-		mv "$airootfs_file" "${REBORN_DIR}/airootfs/"
-		log "New airootfs.sfs copied successfully"
-	else
-		log "WARNING: airootfs.sfs not found in downloaded files"
-	fi
-
-	echo "70"
-	echo "XXX"
-	echo "Copying new kernel..."
-	echo "XXX"
-	log "Copying new kernel"
-	if [ ! -d "${REBORN_DIR}/kernel" ]; then
-		mkdir -p "${REBORN_DIR}/kernel"
-		log "Created kernel directory"
-	fi
-
-	kernel_count=$(find "$TMP_DIR" -name "vmlinuz-*" | wc -l)
-	if [ "$kernel_count" -gt 0 ]; then
-		find "$TMP_DIR" -name "vmlinuz-*" -exec mv {} "${REBORN_DIR}/kernel/" \;
-		log "Copied $kernel_count kernel file(s) successfully"
-	else
-		log "WARNING: No kernel files (vmlinuz-*) found in downloaded files"
-	fi
-
-	echo "85"
-	echo "XXX"
-	echo "Updating /etc/os-release..."
-	echo "XXX"
-	log "Replacing /etc/os-release with new version from $TMP_OS_RELEASE"
-	if [ -f "$TMP_OS_RELEASE" ]; then
-		rm -f "$OS_RELEASE"
-		cp "$TMP_OS_RELEASE" "$OS_RELEASE"
-		log "/etc/os-release replaced successfully"
-	else
-		log "WARNING: $TMP_OS_RELEASE not found, updating IMAGE_VERSION only"
-		if grep -q "^IMAGE_VERSION=" "$OS_RELEASE" 2>/dev/null; then
-			sed -i "/^IMAGE_VERSION=/d" "$OS_RELEASE"
+		local airootfs_file
+		airootfs_file=$(find "$TMP_DIR" -name "airootfs.sfs" -print -quit)
+		if [[ -n "$airootfs_file" ]]; then
+			mv "$airootfs_file" "${REBORN_DIR}/airootfs/"
+			log "New airootfs.sfs copied successfully"
+		else
+			log "WARNING: airootfs.sfs not found in downloaded files"
 		fi
-		echo "IMAGE_VERSION=${NEW_VERSION}" >>"$OS_RELEASE"
+
+		echo "70"; echo "XXX"; echo "Copying new kernel..."; echo "XXX"
+		log "Copying new kernel"
+		mkdir -p "${REBORN_DIR}/kernel"
+		local kernel_count
+		kernel_count=$(find "$TMP_DIR" -name "vmlinuz-*" | wc -l)
+		if [[ "$kernel_count" -gt 0 ]]; then
+			find "$TMP_DIR" -name "vmlinuz-*" -exec mv {} "${REBORN_DIR}/kernel/" \;
+			log "Copied $kernel_count kernel file(s) successfully"
+		else
+			log "WARNING: No kernel files (vmlinuz-*) found in downloaded files"
+		fi
+
+		echo "85"; echo "XXX"; echo "Updating /etc/os-release..."; echo "XXX"
+		log "Replacing $OS_RELEASE with $TMP_OS_RELEASE"
+		if [[ -f "$TMP_OS_RELEASE" ]]; then
+			rm -f "$OS_RELEASE"
+			cp "$TMP_OS_RELEASE" "$OS_RELEASE"
+			log "$OS_RELEASE replaced successfully"
+		else
+			log "WARNING: $TMP_OS_RELEASE not found, patching IMAGE_VERSION only"
+			sed -i '/^IMAGE_VERSION=/d' "$OS_RELEASE" 2>/dev/null || true
+			echo "IMAGE_VERSION=${new_version}" >>"$OS_RELEASE"
+		fi
+
+		echo "95"; echo "XXX"; echo "Cleaning up..."; echo "XXX"
+		log "Removing temporary directory: $TMP_DIR"
+		rm -rf "$TMP_DIR"
+		log "Temporary directory removed"
+
+		echo "100"; echo "XXX"; echo "Complete!"; echo "XXX"
+		sleep 1
+	) | dialog --title "Updating System" --gauge "Starting update process..." 10 70 0
+}
+
+# Main
+
+main() {
+	log "ROS-Reborn-System-OTA started"
+	log "Log file: $LOG_FILE"
+
+	clear
+	check_root
+	check_requirements
+
+	local current_version
+	current_version=$(get_version_from_file "$OS_RELEASE")
+	log "Current system version: $current_version"
+
+
+	dialog --title "ROS-Reborn-System-OTA" --msgbox \
+		"Essentially, this is a tool for updating the backup system before ros-reborn uses it on the main system.\n\nIt will update the ros-reborn backup system to the latest version of the RengeOS ISO. It can help you install the latest RengeOS system with ros-reborn, ensuring you always use the newest version from the RengeOS ISO build, instead of the older version as before.\n" \
+		16 70
+
+	log "Asking user to proceed to version check"
+	if ! dialog --title "Check for Updates" --yesno \
+		"Do you want to check for the latest version?\n\nThe script will fetch only the release version info from GitHub to compare with your current system before downloading anything." \
+		10 65; then
+		log "User cancelled at version check prompt"
+		clear
+		echo "Update cancelled."
+		exit 0
 	fi
 
-	echo "95"
-	echo "XXX"
-	echo "Cleaning up..."
-	echo "XXX"
-	log "Removing temporary directory: $TMP_DIR"
-	rm -rf "$TMP_DIR"
-	log "Temporary directory removed"
+	fetch_preflight_os_release
 
-	echo "100"
-	echo "XXX"
-	echo "Complete!"
-	echo "XXX"
-	sleep 1
-) | dialog --title "Updating System" --gauge "Starting update process..." 10 70 0
+	local new_version
+	new_version=$(get_version_from_file "$PREFLIGHT_OS_RELEASE")
+	log "Remote release version: $new_version"
 
-log "Update process completed successfully"
 
-dialog --title "Complete" --msgbox "Everything is complete!\n\nUpdated version from ${CURRENT_VERSION} to ${NEW_VERSION}.\n\nROS-Reborn system is ready to use.\n\nLog file: ${LOG_FILE}" 14 70
+	if [[ "$new_version" == "Unknown" ]]; then
+		error "Unable to determine the latest version from the fetched os-release file."
+	fi
 
-clear
-log "Update completed successfully"
-log "Old version: $CURRENT_VERSION"
-log "New version: $NEW_VERSION"
-success "Update successful!"
-echo "Old version: ${CURRENT_VERSION}"
-echo "New version: ${NEW_VERSION}"
-echo "Log file: ${LOG_FILE}"
+	local status
+	if [[ "$new_version" == "$current_version" ]]; then
+		status="same"
+	elif [[ "$new_version" > "$current_version" ]]; then
+		status="newer"
+	else
+		status="older"
+	fi
+	log "Version comparison result: $status (current=$current_version, latest=$new_version)"
 
-exit 0
+	if [[ "$status" == "same" ]]; then
+		log "System is already on the latest version: $new_version"
+		dialog --title "Up To Date" --msgbox \
+			"Your system is already on the latest version.\n\n${new_version}" \
+			8 50
+		clear
+		exit 0
+	fi
+
+	log "Showing version comparison dialog (status=$status)"
+	if ! show_version_confirm_dialog "$current_version" "$new_version" "$status"; then
+		log "User declined update after seeing version comparison"
+		clear
+		echo "Update cancelled."
+		exit 0
+	fi
+
+	log "User confirmed - proceeding with full release download"
+	rm -f "$PREFLIGHT_OS_RELEASE"
+
+	dialog --infobox "Creating temporary directory..." 5 40
+	rm -rf "$TMP_DIR" 2>/dev/null || true
+	mkdir -p "$TMP_DIR" || error "Failed to create directory: $TMP_DIR"
+	log "Temporary directory created: $TMP_DIR"
+
+	download_all_release_files "$TMP_DIR"
+
+	local confirmed_version
+	confirmed_version=$(get_version_from_file "$TMP_OS_RELEASE")
+	if [[ "$confirmed_version" == "Unknown" ]]; then
+		rm -rf "$TMP_DIR"
+		error "Unable to determine new version from downloaded os-release file."
+	fi
+	log "Confirmed new version from full download: $confirmed_version"
+
+	log "Starting update: $current_version -> $confirmed_version"
+	apply_update "$current_version" "$confirmed_version"
+	log "Update process completed successfully"
+
+	dialog --title "Complete" --msgbox \
+		"Everything is complete!\n\nUpdated version from ${current_version} to ${confirmed_version}.\n\nROS-Reborn system is ready to use.\n\nLog file: ${LOG_FILE}" \
+		14 70
+
+	clear
+	success "Update successful! ${current_version} -> ${confirmed_version}"
+	log "Old version: $current_version"
+	log "New version: $confirmed_version"
+	echo "Old version: ${current_version}"
+	echo "New version: ${confirmed_version}"
+	echo "Log file: ${LOG_FILE}"
+}
+
+main "$@"
