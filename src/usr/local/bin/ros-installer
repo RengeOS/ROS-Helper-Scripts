@@ -1522,9 +1522,9 @@ rm -rf /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
 if [[ "$(grep ^IMAGE_ID= /etc/os-release | cut -d= -f2)" == "rengeos-niriwm" ]]; then
     log "Deleting unused items on NiriWM..."
 	rm -rf /etc/polkit-1/rules.d/
-	log "Enabling ly login manager service"
-	systemctl enable ly@tty2.service
-	log "Remove liveuser account"
+	log "Deleting the sudoers.d folder to prevent using sudo without a password..."
+	rm -rf /etc/sudoers.d/
+	log "Removing liveuser account"
 	userdel -r liveuser
 fi
 
@@ -1692,6 +1692,8 @@ EOF
 if [[ "$(grep ^IMAGE_ID= /etc/os-release | cut -d= -f2)" == "rengeos-niriwm" ]]; then
     log "Deleting unused items on NiriWM..."
 	rm -rf /etc/polkit-1/rules.d/
+	log "Deleting the sudoers.d folder to prevent using sudo without a password..."
+	rm -rf /etc/sudoers.d/
 	log "Enabling ly login manager service"
 	systemctl enable ly@tty2.service
 	log "Remove liveuser account"
