@@ -990,6 +990,15 @@ if grep -q "^#\[multilib\]" /etc/pacman.conf; then
     log "Multilib repository enabled"
 fi
 
+if [[ "$(grep ^IMAGE_ID= /etc/os-release | cut -d= -f2)" == "rengeos-niriwm" ]]; then
+    log "Deleting unused items on NiriWM..."
+	rm -rf /etc/polkit-1/rules.d/
+	log "Enabling ly login manager service"
+	systemctl enable ly@tty2.service
+	log "Remove liveuser account"
+	userdel -r liveuser
+fi
+
 log "Setting up users..."
 echo "root:${ROOT_PASS}" | chpasswd
 
