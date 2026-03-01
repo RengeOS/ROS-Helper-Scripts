@@ -1,5 +1,6 @@
 #!/bin/bash
 
+## SPDX-License-Identifier: GPL-3.0-or-later
 ## Copyright (C) 2026 Le Nguyen Hoang Gia Phu <crystalforceix@gmail.com>
 
 set -eo pipefail
@@ -1343,6 +1344,10 @@ Press OK to finish." 24 70
 main() {
 	clear
 
+	if [[ $EUID -ne 0 ]]; then
+    	exec sudo bash "$0" "$@"
+	fi
+	
 	echo "========================================" >"${LOG_FILE}"
 	echo "RengeOS Reborn On Recovery Mode" >>"${LOG_FILE}"
 	echo "========================================" >>"${LOG_FILE}"

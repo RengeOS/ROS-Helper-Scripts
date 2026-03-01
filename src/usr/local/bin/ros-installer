@@ -1,5 +1,6 @@
 #!/bin/bash
 
+## SPDX-License-Identifier: GPL-3.0-or-later
 ## Copyright (C) 2026 Le Nguyen Hoang Gia Phu <crystalforceix@gmail.com>
 
 set -eo pipefail
@@ -21,7 +22,7 @@ TIMEZONE=""
 LOCALE=""
 KERNEL_NAME=""
 BOOT_SIZE="1G"
-RECOVERY_SIZE="7G"
+RECOVERY_SIZE="10G"
 BOOT_MODE=""
 BOOT_FS=""
 ENABLE_RECOVERY="no"
@@ -108,7 +109,7 @@ Note: Manual partitioning gives you full control over partition layout." 13 70; 
 		dialog --title "Manual Partitioning Requirements" --yesno "\
 Manual Partitioning Requirements:\n\n\
 - Boot partition (/boot) needs 1G or more\n\
-- Recovery partition (optional) needs 7GB or more\n\
+- Recovery partition (optional) needs 10GB or more\n\
 - Root partition (/) will use remaining space\n\n\
 WARNING: Below recommended sizes may cause low disk space errors!\n\n\
 Next, we will use cfdisk on ${DISK}\n\n\
@@ -188,7 +189,7 @@ Should have sufficient space for system and applications" 15 70 10 "${root_menu[
 		if dialog --title "Recovery Partition" --yesno "\
 Do you want to select a partition for Recovery Mode?\n\n\
 Recovery Mode provides emergency rescue system.\n\
-Minimum: 7G recommended\n\
+Minimum: 10G recommended\n\
 Filesystem: XFS (GRUB-compatible)" 12 70; then
 			ENABLE_RECOVERY="yes"
 
@@ -219,7 +220,7 @@ Filesystem: XFS (GRUB-compatible)" 12 70; then
 				RECOVERY_PART=$(dialog --title "Select Recovery Partition" --menu "\
 Select the partition for /recovery:\n\n\
 Will be used for emergency rescue system.\n\
-Minimum: 7G recommended" 14 70 10 "${recovery_menu[@]}" 3>&1 1>&2 2>&3) || exit 0
+Minimum: 10G recommended" 14 70 10 "${recovery_menu[@]}" 3>&1 1>&2 2>&3) || exit 0
 
 				RECOVERY_PART="/dev/$RECOVERY_PART"
 				log "User selected recovery partition: $RECOVERY_PART"
@@ -233,7 +234,7 @@ Minimum: 7G recommended" 14 70 10 "${recovery_menu[@]}" 3>&1 1>&2 2>&3) || exit 
 		# Get actual partition sizes for summary
 		BOOT_SIZE=$(lsblk -n -o SIZE "$BOOT_PART" 2>/dev/null || echo "1G")
 		if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
-			RECOVERY_SIZE=$(lsblk -n -o SIZE "$RECOVERY_PART" 2>/dev/null || echo "7G")
+			RECOVERY_SIZE=$(lsblk -n -o SIZE "$RECOVERY_PART" 2>/dev/null || echo "10G")
 		fi
 
 		log "Manual partitioning completed:"
@@ -801,8 +802,7 @@ What is Recovery Mode?\n\
   - Stored on separate XFS partition (GRUB-compatible)\n\
   - Includes /rengeos-reborn\n\n\
 Requirements:\n\
-  - Minimum size: 5GB (REQUIRED)\n\
-  - Recommended: 7GB or more\n\
+  - Recommended: 10GB or more\n\
   - Uses disk space from your drive\n\n\
 Enable Recovery Mode now?" 21 70; then
 		ENABLE_RECOVERY="yes"
@@ -813,20 +813,19 @@ Enable Recovery Mode now?" 21 70; then
 Enter recovery partition size:\n\n\
 This will create a separate bootable system for rescue\n\
 and store system backup files.\n\n\
-Minimum: 5G (REQUIRED - below 5GB not allowed)\n\
-Recommended: 7G\n\
-Format: 5G, 7G, 6144M, etc.\n\n\
-Note: This space will be taken from your disk." 17 70 "7G" 3>&1 1>&2 2>&3)
+Recommended: 10G\n\
+Format: 10G, 15G, 6144M, etc.\n\n\
+Note: This space will be taken from your disk." 17 70 "10G" 3>&1 1>&2 2>&3)
 
 			if [ $? -ne 0 ]; then
-				RECOVERY_SIZE="7G"
+				RECOVERY_SIZE="10G"
 				break
 			fi
 
 			if ! [[ "$RECOVERY_SIZE" =~ ^[0-9]+[MG]$ ]]; then
 				dialog --title "Invalid Format" --msgbox "\
 Invalid size format!\n\n\
-Please use format like: 5G, 7G, 6144M\n\n\
+Please use format like: 10G, 15G, 6144M\n\n\
 Press OK to try again." 10 50
 				continue
 			fi
@@ -841,18 +840,18 @@ Press OK to try again." 10 50
 				size_in_mb=$((size_value * 1024))
 			fi
 
-			if [ $size_in_mb -lt 5120 ]; then
-				dialog --title "Size Too Small" --msgbox "\
+			if [ $size_in_mb -lt 10240 ]; then
+				dialog --title "Size Too Small than 10GB (10240MB)" --msgbox "\
 Recovery partition size is too small!\n\n\
 You entered: $RECOVERY_SIZE\n\
-Minimum required: 5G (5120MB)\n\n\
+Minimum required: 10G (10240MB)\n\n\
 Recovery partition needs space for:\n\
-  - Extracted system files (~2-3GB)\n\
-  - System backup (airootfs.sfs ~1-2GB)\n\
+  - Extracted system files (~2-4GB)\n\
+  - System backup (airootfs.sfs ~1-3GB)\n\
   - Kernel and initramfs\n\
   - Working space\n\n\
-Please enter at least 5G or more.\n\
-Recommended: 7G\n\n\
+Please enter at least 10G or more.\n\
+Recommended: 10G\n\n\
 Press OK to try again." 20 60
 				continue
 			fi
@@ -898,14 +897,14 @@ Format: 512M, 1G, 2G, etc." 20 70 "1G" 3>&1 1>&2 2>&3) || BOOT_SIZE="1G"
 show_configuration_summary() {
 	local boot_fs_display=""
 	if [ "$BOOT_MODE" = "UEFI" ]; then
-		boot_fs_display="FAT32 (EFI)"
+		boot_fs_display="FAT32 (/boot)"
 	else
-		boot_fs_display="XFS (GRUB)"
+		boot_fs_display="XFS (/boot)"
 	fi
 
 	local root_fs_display=""
 	if [ "$ROOT_FSTYPE" = "xfs" ]; then
-		root_fs_display="XFS (LZ4 optimized)"
+		root_fs_display="XFS"
 	else
 		root_fs_display="Bcachefs (LZ4 compression)"
 	fi
@@ -2066,6 +2065,10 @@ Press OK to finish." 30 70
 
 main() {
 	clear
+
+	if [[ $EUID -ne 0 ]]; then
+    	exec sudo bash "$0" "$@"
+	fi
 
 	echo "========================================" >"$LOG_FILE"
 	echo "RengeOS Installation" >>"$LOG_FILE"
