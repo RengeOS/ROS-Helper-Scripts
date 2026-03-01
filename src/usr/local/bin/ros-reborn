@@ -1027,14 +1027,37 @@ else
 fi
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
 
+# First, remove any kernels that were not selected
+if [[ -n "${OTHER_KERNELS}" ]]; then
+    log "Removing unselected kernels: ${OTHER_KERNELS}"
+    for kernel in ${OTHER_KERNELS}; do
+        log "Removing kernel: ${kernel} and its headers"
+        pacman -R --noconfirm "${kernel}" "${kernel}-headers" 2>/dev/null || {
+            log "Warning: Failed to remove kernel ${kernel} or it was not installed"
+        }
+    done
+fi
+
+# Now clean up any leftover preset files
 log "Cleaning up duplicate kernel presets..."
 rm -f /etc/mkinitcpio.d/*.preset 2>/dev/null || true
 
 log "Creating kernel preset for ${KERNEL_NAME}..."
-KVER=$(ls /usr/lib/modules | grep "${KERNEL_NAME#linux-}" | head -n1)
+
+# Find the exact kernel module directory matching the suffix
+KVER=""
+# Try exact suffix match first
+suffix="${KERNEL_NAME#linux-}"
+if [[ -n "$suffix" ]]; then
+    KVER=$(find /usr/lib/modules -maxdepth 1 -type d -name "*-${suffix}" -printf "%f\n" | head -n1)
+fi
+# Fallback to grep if not found
+if [[ -z "${KVER}" ]]; then
+    KVER=$(ls /usr/lib/modules | grep "${suffix}" | head -n1)
+fi
 
 if [[ -z "${KVER}" ]]; then
-    echo "ERROR: Kernel ${KERNEL_NAME} not found in /usr/lib/modules"
+    echo "ERROR: Kernel ${KERNEL_NAME} module directory not found in /usr/lib/modules"
     ls -la /usr/lib/modules/
     exit 1
 fi
@@ -1043,7 +1066,7 @@ log "Found kernel version: ${KVER}"
 
 cat >"/etc/mkinitcpio.d/${KERNEL_NAME}.preset" <<PRESET_EOF
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="\$(ls /usr/lib/modules | grep ${KERNEL_NAME#linux-})"
+ALL_kver="${KVER}"
 PRESETS=('default')
 default_image="/boot/initramfs-${KERNEL_NAME}.img"
 PRESET_EOF
@@ -1071,16 +1094,6 @@ fi
 
 log "Initramfs generated successfully"
 ls -lh /boot/initramfs-*.img
-
-if [[ -n "${OTHER_KERNELS}" ]]; then
-    log "Removing unselected kernels: ${OTHER_KERNELS}"
-    for kernel in ${OTHER_KERNELS}; do
-        log "Removing kernel: ${kernel} and its headers"
-        pacman -R --noconfirm "${kernel}" "${kernel}-headers" 2>/dev/null || {
-            log "Warning: Failed to remove kernel ${kernel} or it was not installed"
-        }
-    done
-fi
 
 if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
     log "Configuring Zram..."
