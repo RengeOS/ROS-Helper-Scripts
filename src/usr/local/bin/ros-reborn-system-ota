@@ -11,9 +11,9 @@ REBORN_DIR="/rengeos-reborn"
 TMP_DIR="${REBORN_DIR}/tmp"
 OS_RELEASE="/etc/os-release"
 TMP_OS_RELEASE="${TMP_DIR}/os-release"
-GITHUB_REPO="RengeOS/ROS-Reborn-System-OTA"
 PREFLIGHT_OS_RELEASE="/tmp/ros-reborn-preflight-os-release"
 LOG_FILE="/tmp/ros-reborn-system-ota.log"
+GITHUB_REPO=""
 
 # Logging
 
@@ -27,7 +27,7 @@ error() {
 		dialog --title "Error" --msgbox "$*\n\nCheck log: $LOG_FILE" 12 70
 	fi
 	rm -rf "$TMP_DIR" 2>/dev/null || true
-	rm -f "$PREFLIGHT_OS_RELEASE" 2>/dev/null || true
+	rm -f  "$PREFLIGHT_OS_RELEASE" 2>/dev/null || true
 	exit 1
 }
 
@@ -75,15 +75,60 @@ check_requirements() {
 	log "All required tools are available"
 }
 
-# Version helper
+# Edition selection
+
+select_edition() {
+	log "Asking user to select an edition..."
+
+	local choice
+	choice=$(dialog \
+		--title "Select Edition" \
+		--menu "Please choose the edition you want to update to:" \
+		10 60 2 \
+		"1" "NiriWM-Edition" \
+		"2" "Minimal-Edition" \
+		3>&1 1>&2 2>&3) || {
+		log "User cancelled edition selection"
+		clear
+		echo "Update cancelled."
+		exit 0
+	}
+
+	case "$choice" in
+		1)
+			GITHUB_REPO="RengeOS/ROS-Reborn-System-OTA-NiriWM"
+			log "User selected NiriWM-Edition -> repo: $GITHUB_REPO"
+			;;
+		2)
+			GITHUB_REPO="RengeOS/ROS-Reborn-System-OTA-Minimal"
+			log "User selected Minimal-Edition -> repo: $GITHUB_REPO"
+			;;
+		*)
+			error "Unexpected edition choice: $choice"
+			;;
+	esac
+}
+
+# Image ID helper
+# Reads IMAGE_ID from an os-release file without sourcing it.
+# Returns "Unknown" if the field is not found.
+
+get_image_id_from_file() {
+	local file="$1"
+	local value
+	value=$(grep '^IMAGE_ID=' "$file" 2>/dev/null | cut -d= -f2 | tr -d '"') || true
+	echo "${value:-Unknown}"
+}
+
+# Image date helper
 # Reads IMAGE_VERSION from an os-release file without sourcing it.
 # Returns "Unknown" if the field is not found.
 
-get_version_from_file() {
+get_image_date_from_file() {
 	local file="$1"
-	local version
-	version=$(grep '^IMAGE_VERSION=' "$file" 2>/dev/null | cut -d= -f2 | tr -d '"') || true
-	echo "${version:-Unknown}"
+	local value
+	value=$(grep '^IMAGE_VERSION=' "$file" 2>/dev/null | cut -d= -f2 | tr -d '"') || true
+	echo "${value:-Unknown}"
 }
 
 # Pre-flight fetch of os-release only
@@ -95,9 +140,6 @@ fetch_preflight_os_release() {
 
 	rm -f "$PREFLIGHT_OS_RELEASE"
 
-	# Resolve the direct download URL for os-release via the GitHub API
-	# to avoid depending on redirect behaviour in wget.
-	# Each grep is guarded with || true so a no-match does not abort under set -eo pipefail.
 	local api_json direct_url
 	api_json=$(wget -qO- --timeout=15 \
 		"https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>>"$LOG_FILE") || true
@@ -129,29 +171,53 @@ fetch_preflight_os_release() {
 }
 
 # Version comparison dialog
-# Shows only the two IMAGE_VERSION values (which are dates) side by side.
+# Shows IMAGE_ID and IMAGE_VERSION (date) values side by side.
 
 show_version_confirm_dialog() {
-	local current_ver="$1"
-	local new_ver="$2"
-	local status="$3"
+	local local_image_id="$1"
+	local remote_image_id="$2"
+	local current_date="$3"
+	local new_date="$4"
+	local status="$5"
 
 	local status_line
 	case "$status" in
 		newer)   status_line="A newer version is available." ;;
 		older)   status_line="WARNING: The remote version is OLDER than your current version." ;;
+		id_diff) status_line="WARNING: IMAGE_ID has changed between versions." ;;
 		unknown) status_line="Version comparison could not be determined." ;;
 	esac
 
 	local msg
 	printf -v msg \
-		'%s\n\n  %-16s %s\n  %-16s %s\n\n%s\n\nDo you want to download and apply this update?' \
+		'%s\n\n  %-20s %s\n  %-20s %s\n\n  %-20s %s\n  %-20s %s\n\n%s\n\nDo you want to download and apply this update?' \
 		"Version comparison:" \
-		"Current:" "$current_ver" \
-		"Latest:"  "$new_ver" \
+		"Current IMAGE_ID:"  "$local_image_id" \
+		"Latest IMAGE_ID:"   "$remote_image_id" \
+		"Current version:"   "$current_date" \
+		"Latest version:"    "$new_date" \
 		"$status_line"
 
-	dialog --title "Confirm Update" --defaultno --yesno "$msg" 16 70
+	dialog --title "Confirm Update" --defaultno --yesno "$msg" 18 70
+}
+
+# Merge split airootfs parts into a single airootfs.sfs.
+# If no part files are found, returns immediately (Minimal Edition compatibility).
+
+merge_airootfs_parts() {
+	local tmp_dir="$1"
+
+	ls "${tmp_dir}"/airootfs.sfs.part* &>/dev/null || return 0
+
+	log "Merging airootfs.sfs parts into airootfs.sfs"
+	dialog --infobox "Merging airootfs parts into airootfs.sfs..." 5 55
+
+	if ! cat "${tmp_dir}"/airootfs.sfs.part* > "${tmp_dir}/airootfs.sfs"; then
+		error "Failed to merge airootfs part files into airootfs.sfs."
+	fi
+
+	rm -f "${tmp_dir}"/airootfs.sfs.part*
+	log "Merge complete -> ${tmp_dir}/airootfs.sfs ($(du -h "${tmp_dir}/airootfs.sfs" | cut -f1))"
 }
 
 # Download all release files
@@ -184,6 +250,7 @@ download_all_release_files() {
 	local current_file=0
 	for download_url in "${url_array[@]}"; do
 		current_file=$((current_file + 1))
+
 		local filename
 		filename=$(basename "$download_url")
 		log "Downloading file $current_file/$total_files: $filename"
@@ -196,9 +263,11 @@ download_all_release_files() {
 			--gauge "File: $filename ($current_file/$total_files)" 10 70 0 <"$fifo" &
 		local dialog_pid=$!
 
+		# Give dialog time to open the read-end of the fifo before we open the write-end,
+		# otherwise the open of the write-end will block indefinitely.
+		sleep 0.2
 		exec 3>"$fifo"
 
-		local download_success=0
 		(
 			echo "0"
 			echo "XXX"; echo "Starting download: $filename"; echo "XXX"
@@ -213,7 +282,6 @@ download_all_release_files() {
 				echo "100"
 				echo "XXX"; echo "Download complete: $filename"; echo "XXX"
 				sleep 0.5
-				exit 0
 			else
 				echo "0"
 				echo "XXX"; echo "Download failed: $filename"; echo "XXX"
@@ -221,18 +289,24 @@ download_all_release_files() {
 				exit 1
 			fi
 		) >&3
-		download_success=$?
+		local download_exit=$?
 
 		exec 3>&-
 		wait "$dialog_pid" 2>/dev/null || true
 		rm -f "$fifo"
 
-		if [[ $download_success -ne 0 ]] || [[ ! -f "$filename" ]]; then
+		if [[ $download_exit -ne 0 ]] || [[ ! -f "$filename" ]]; then
 			error "Failed to download: $filename"
 		fi
 
 		log "Successfully downloaded: $filename ($(du -h "$filename" | cut -f1))"
 	done
+
+	merge_airootfs_parts "$tmp_dir"
+
+	if [[ ! -f "${tmp_dir}/airootfs.sfs" ]]; then
+		error "airootfs.sfs not found in $tmp_dir after download. Check the release assets."
+	fi
 
 	cd - >/dev/null || true
 	log "All files downloaded successfully"
@@ -243,62 +317,68 @@ download_all_release_files() {
 apply_update() {
 	local current_version="$1"
 	local new_version="$2"
+	local update_log="/tmp/ros-reborn-apply-update.log"
+
+	rm -f "$update_log"
 
 	(
+		set -e
+
 		echo "10"; echo "XXX"; echo "Deleting old airootfs..."; echo "XXX"
-		log "Deleting old airootfs from ${REBORN_DIR}/airootfs/"
+		log "Deleting old airootfs from ${REBORN_DIR}/airootfs/" 2>>"$update_log"
 		rm -rf "${REBORN_DIR}/airootfs/"*
-		log "Old airootfs deleted"
+		log "Old airootfs deleted" 2>>"$update_log"
 
 		echo "30"; echo "XXX"; echo "Deleting old kernel..."; echo "XXX"
-		log "Deleting old kernel from ${REBORN_DIR}/kernel/"
+		log "Deleting old kernel from ${REBORN_DIR}/kernel/" 2>>"$update_log"
 		rm -rf "${REBORN_DIR}/kernel/"*
-		log "Old kernel deleted"
+		log "Old kernel deleted" 2>>"$update_log"
 
 		echo "50"; echo "XXX"; echo "Copying new airootfs.sfs..."; echo "XXX"
-		log "Copying new airootfs.sfs"
+		log "Copying new airootfs.sfs" 2>>"$update_log"
 		mkdir -p "${REBORN_DIR}/airootfs"
-		local airootfs_file
-		airootfs_file=$(find "$TMP_DIR" -name "airootfs.sfs" -print -quit)
-		if [[ -n "$airootfs_file" ]]; then
-			mv "$airootfs_file" "${REBORN_DIR}/airootfs/"
-			log "New airootfs.sfs copied successfully"
-		else
-			log "WARNING: airootfs.sfs not found in downloaded files"
-		fi
+		mv "${TMP_DIR}/airootfs.sfs" "${REBORN_DIR}/airootfs/airootfs.sfs"
+		log "New airootfs.sfs moved successfully" 2>>"$update_log"
 
 		echo "70"; echo "XXX"; echo "Copying new kernel..."; echo "XXX"
-		log "Copying new kernel"
+		log "Copying new kernel" 2>>"$update_log"
 		mkdir -p "${REBORN_DIR}/kernel"
 		local kernel_count
 		kernel_count=$(find "$TMP_DIR" -name "vmlinuz-*" | wc -l)
 		if [[ "$kernel_count" -gt 0 ]]; then
 			find "$TMP_DIR" -name "vmlinuz-*" -exec mv {} "${REBORN_DIR}/kernel/" \;
-			log "Copied $kernel_count kernel file(s) successfully"
+			log "Copied $kernel_count kernel file(s) successfully" 2>>"$update_log"
 		else
-			log "WARNING: No kernel files (vmlinuz-*) found in downloaded files"
+			log "WARNING: No kernel files (vmlinuz-*) found in downloaded files" 2>>"$update_log"
 		fi
 
 		echo "85"; echo "XXX"; echo "Updating /etc/os-release..."; echo "XXX"
-		log "Replacing $OS_RELEASE with $TMP_OS_RELEASE"
+		log "Replacing $OS_RELEASE with $TMP_OS_RELEASE" 2>>"$update_log"
 		if [[ -f "$TMP_OS_RELEASE" ]]; then
 			rm -f "$OS_RELEASE"
 			cp "$TMP_OS_RELEASE" "$OS_RELEASE"
-			log "$OS_RELEASE replaced successfully"
+			log "$OS_RELEASE replaced successfully" 2>>"$update_log"
 		else
-			log "WARNING: $TMP_OS_RELEASE not found, patching IMAGE_VERSION only"
+			log "WARNING: $TMP_OS_RELEASE not found, patching IMAGE_VERSION only" 2>>"$update_log"
 			sed -i '/^IMAGE_VERSION=/d' "$OS_RELEASE" 2>/dev/null || true
 			echo "IMAGE_VERSION=${new_version}" >>"$OS_RELEASE"
 		fi
 
 		echo "95"; echo "XXX"; echo "Cleaning up..."; echo "XXX"
-		log "Removing temporary directory: $TMP_DIR"
+		log "Removing temporary directory: $TMP_DIR" 2>>"$update_log"
 		rm -rf "$TMP_DIR"
-		log "Temporary directory removed"
+		log "Temporary directory removed" 2>>"$update_log"
 
 		echo "100"; echo "XXX"; echo "Complete!"; echo "XXX"
 		sleep 1
 	) | dialog --title "Updating System" --gauge "Starting update process..." 10 70 0
+
+	local pipe_exit=${PIPESTATUS[0]}
+	if [[ $pipe_exit -ne 0 ]]; then
+		[[ -s "$update_log" ]] && cat "$update_log" >>"$LOG_FILE"
+		error "Update process failed. Check log: $LOG_FILE"
+	fi
+	rm -f "$update_log"
 }
 
 # Main
@@ -311,10 +391,10 @@ main() {
 	check_root
 	check_requirements
 
-	local current_version
-	current_version=$(get_version_from_file "$OS_RELEASE")
-	log "Current system version: $current_version"
-
+	local current_image_id current_date
+	current_image_id=$(get_image_id_from_file "$OS_RELEASE")
+	current_date=$(get_image_date_from_file "$OS_RELEASE")
+	log "Current IMAGE_ID: $current_image_id | Current version: $current_date"
 
 	dialog --title "ROS-Reborn-System-OTA" --msgbox \
 		"Essentially, this is a tool for updating the backup system before ros-reborn uses it on the main system.\n\nIt will update the ros-reborn backup system to the latest version of the RengeOS ISO. It can help you install the latest RengeOS system with ros-reborn, ensuring you always use the newest version from the RengeOS ISO build, instead of the older version as before.\n" \
@@ -330,38 +410,45 @@ main() {
 		exit 0
 	fi
 
+	select_edition
+
 	fetch_preflight_os_release
 
-	local new_version
-	new_version=$(get_version_from_file "$PREFLIGHT_OS_RELEASE")
-	log "Remote release version: $new_version"
+	local remote_image_id remote_date
+	remote_image_id=$(get_image_id_from_file "$PREFLIGHT_OS_RELEASE")
+	remote_date=$(get_image_date_from_file "$PREFLIGHT_OS_RELEASE")
 
+	log "Remote IMAGE_ID: $remote_image_id | Remote version: $remote_date"
 
-	if [[ "$new_version" == "Unknown" ]]; then
+	if [[ "$remote_image_id" == "Unknown" || "$remote_date" == "Unknown" ]]; then
 		error "Unable to determine the latest version from the fetched os-release file."
 	fi
 
-	local status
-	if [[ "$new_version" == "$current_version" ]]; then
-		status="same"
-	elif [[ "$new_version" > "$current_version" ]]; then
-		status="newer"
-	else
-		status="older"
-	fi
-	log "Version comparison result: $status (current=$current_version, latest=$new_version)"
-
-	if [[ "$status" == "same" ]]; then
-		log "System is already on the latest version: $new_version"
+	if [[ "$current_image_id" == "$remote_image_id" && "$current_date" == "$remote_date" ]]; then
+		log "System is already up to date: IMAGE_ID=$current_image_id, version=$current_date"
 		dialog --title "Up To Date" --msgbox \
-			"Your system is already on the latest version.\n\n${new_version}" \
-			8 50
+			"Your system is already on the latest version.\n\nIMAGE_ID : ${current_image_id}\nVersion  : ${current_date}" \
+			10 55
 		clear
 		exit 0
 	fi
 
-	log "Showing version comparison dialog (status=$status)"
-	if ! show_version_confirm_dialog "$current_version" "$new_version" "$status"; then
+	local status
+	if [[ "$current_image_id" != "$remote_image_id" ]]; then
+		status="id_diff"
+	elif [[ "$remote_date" > "$current_date" ]]; then
+		status="newer"
+	elif [[ "$remote_date" < "$current_date" ]]; then
+		status="older"
+	else
+		status="unknown"
+	fi
+	log "Version comparison result: $status (local_id=$current_image_id, remote_id=$remote_image_id, current=$current_date, latest=$remote_date)"
+
+	if ! show_version_confirm_dialog \
+		"$current_image_id" "$remote_image_id" \
+		"$current_date" "$remote_date" \
+		"$status"; then
 		log "User declined update after seeing version comparison"
 		clear
 		echo "Update cancelled."
@@ -378,28 +465,28 @@ main() {
 
 	download_all_release_files "$TMP_DIR"
 
-	local confirmed_version
-	confirmed_version=$(get_version_from_file "$TMP_OS_RELEASE")
-	if [[ "$confirmed_version" == "Unknown" ]]; then
+	local confirmed_date
+	confirmed_date=$(get_image_date_from_file "$TMP_OS_RELEASE")
+	if [[ "$confirmed_date" == "Unknown" ]]; then
 		rm -rf "$TMP_DIR"
 		error "Unable to determine new version from downloaded os-release file."
 	fi
-	log "Confirmed new version from full download: $confirmed_version"
+	log "Confirmed new version from full download: $confirmed_date"
 
-	log "Starting update: $current_version -> $confirmed_version"
-	apply_update "$current_version" "$confirmed_version"
+	log "Starting update: $current_date -> $confirmed_date"
+	apply_update "$current_date" "$confirmed_date"
 	log "Update process completed successfully"
 
 	dialog --title "Complete" --msgbox \
-		"Everything is complete!\n\nUpdated version from ${current_version} to ${confirmed_version}.\n\nROS-Reborn system is ready to use.\n\nLog file: ${LOG_FILE}" \
+		"Everything is complete!\n\nIMAGE_ID : ${current_image_id} -> ${remote_image_id}\nVersion  : ${current_date} -> ${confirmed_date}\n\nROS-Reborn system is ready to use.\n\nLog file: ${LOG_FILE}" \
 		14 70
 
 	clear
-	success "Update successful! ${current_version} -> ${confirmed_version}"
-	log "Old version: $current_version"
-	log "New version: $confirmed_version"
-	echo "Old version: ${current_version}"
-	echo "New version: ${confirmed_version}"
+	success "Update successful!"
+	log "Old IMAGE_ID: $current_image_id | Old version: $current_date"
+	log "New IMAGE_ID: $remote_image_id | New version: $confirmed_date"
+	echo "Old IMAGE_ID: ${current_image_id} | Old version: ${current_date}"
+	echo "New IMAGE_ID: ${remote_image_id} | New version: ${confirmed_date}"
 	echo "Log file: ${LOG_FILE}"
 }
 

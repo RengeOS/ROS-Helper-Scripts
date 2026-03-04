@@ -1560,18 +1560,34 @@ log "Recovery mkinitcpio configuration:"
 grep "^MODULES=" /etc/mkinitcpio.conf
 grep "^HOOKS=" /etc/mkinitcpio.conf
 
+# --- Improved preset creation for recovery (based on ros-reborn) ---
 log "Creating kernel preset for recovery $KERNEL_NAME..."
-KVER=$(ls /usr/lib/modules | grep "${KERNEL_NAME#linux-}" | head -n1)
 
-if [ -z "$KVER" ]; then
-    echo "ERROR: Kernel $KERNEL_NAME not found in recovery"
-    ls /usr/lib/modules
+# Extract the suffix (e.g., "lts" from "linux-lts")
+suffix="${KERNEL_NAME#linux-}"
+KVER=""
+
+# Try exact match first
+if [[ -n "$suffix" ]]; then
+    KVER=$(find /usr/lib/modules -maxdepth 1 -type d -name "*-${suffix}" -printf "%f\n" | head -n1)
+fi
+
+# Fallback to grep if not found
+if [[ -z "$KVER" ]]; then
+    KVER=$(ls /usr/lib/modules | grep "${suffix}" | head -n1)
+fi
+
+if [[ -z "$KVER" ]]; then
+    echo "ERROR: Kernel $KERNEL_NAME module directory not found in /usr/lib/modules"
+    ls -la /usr/lib/modules/
     exit 1
 fi
 
+log "Found kernel version: $KVER"
+
 cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="\$(ls /usr/lib/modules | grep ${KERNEL_NAME#linux-})"
+ALL_kver="$KVER"
 PRESETS=('default')
 default_image="/boot/initramfs-$KERNEL_NAME.img"
 EOF
@@ -1750,17 +1766,34 @@ else
     sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress)/' /etc/mkinitcpio.conf
 fi
 
+# --- Improved preset creation for main system (based on ros-reborn) ---
 log "Creating kernel preset for $KERNEL_NAME..."
-KVER=$(ls /usr/lib/modules | grep "${KERNEL_NAME#linux-}" | head -n1)
 
-if [ -z "$KVER" ]; then
-    echo "ERROR: Kernel $KERNEL_NAME not found"
+# Extract the suffix (e.g., "lts" from "linux-lts")
+suffix="${KERNEL_NAME#linux-}"
+KVER=""
+
+# Try exact match first
+if [[ -n "$suffix" ]]; then
+    KVER=$(find /usr/lib/modules -maxdepth 1 -type d -name "*-${suffix}" -printf "%f\n" | head -n1)
+fi
+
+# Fallback to grep if not found
+if [[ -z "$KVER" ]]; then
+    KVER=$(ls /usr/lib/modules | grep "${suffix}" | head -n1)
+fi
+
+if [[ -z "$KVER" ]]; then
+    echo "ERROR: Kernel $KERNEL_NAME module directory not found in /usr/lib/modules"
+    ls -la /usr/lib/modules/
     exit 1
 fi
 
+log "Found kernel version: $KVER"
+
 cat > "/etc/mkinitcpio.d/$KERNEL_NAME.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="\$(ls /usr/lib/modules | grep ${KERNEL_NAME#linux-})"
+ALL_kver="$KVER"
 PRESETS=('default')
 default_image="/boot/initramfs-$KERNEL_NAME.img"
 EOF
