@@ -28,6 +28,8 @@ BOOT_FS=""
 ENABLE_RECOVERY="no"
 ROOT_FS="bcachefs"
 OTHER_KERNELS=""
+VMLINUZ_RECOVERY_MODE_PARTITION=""
+INITRAMFS_RECOVERY_MODE_PARTITION=""
 ROOT_PASSWORD=""
 USER_PASSWORD=""
 ENABLE_ZRAM="no"
@@ -100,7 +102,7 @@ Legacy BIOS Mode:\n\
   - Older systems\n\
   - Uses MBR partition table\n\
   - Boot partition: XFS\n\n\
-Select boot mode:" 35 75 2 \
+Select boot mode:" 25 75 2 \
 		"UEFI" "Modern UEFI boot (recommended for new systems)" \
 		"LEGACY" "Legacy BIOS boot (for older systems)" \
 		3>&1 1>&2 2>&3)
@@ -314,7 +316,7 @@ Filesystem Layout:\n\
     - Root partition: Will be formatted as selected filesystem\n\n\
 WARNING: Selected partitions will be FORMATTED!\n\
          All data on selected partitions will be LOST!\n\n\
-Press OK to continue or Cancel to exit." 35 75
+Press OK to continue or Cancel to exit." 25 75
 }
 
 select_partitions() {
@@ -431,15 +433,13 @@ Boot Mode: ${BOOT_MODE}\n\
 Parent Disk: ${DISK}\n\n\
 BOOT/EFI Partition:\n\
   Device: ${BOOT_PART}\n\
-  Will be formatted as: ${BOOT_FS}\n\
   Current info:\n${boot_info}\n\n\
 ROOT Partition:\n\
   Device: ${ROOT_PART}\n\
-  Will be formatted as: ${ROOT_FS}\n\
   Current info:\n${root_info}${recovery_info}\n\n\
 WARNING: Boot and Root partitions will be FORMATTED!\n\
          Recovery (if selected) will NOT be formatted.\n\n\
-Continue with installation?" 28 75 || exit 0
+Continue with installation?" 25 75 || exit 0
 }
 
 configure_system_locale() {
@@ -963,6 +963,8 @@ ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
 ROOT_FS="${SETUP_ROOT_FS}"
 OTHER_KERNELS="${OTHER_KERNELS}"
+VMLINUZ_RECOVERY="${SETUP_VMLINUZ_RECOVERY}"
+INITRAMFS_RECOVERY="${SETUP_INITRAMFS_RECOVERY}"
 
 log "Setting timezone to ${TIMEZONE}..."
 ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
@@ -1198,8 +1200,8 @@ menuentry 'Recovery Mode' {
     insmod part_msdos
     insmod ${RECOVERY_FS}
     search --no-floppy --fs-uuid --set=root ${RECOVERY_UUID}
-    linux /boot/vmlinuz-${KERNEL_NAME} root=UUID=${RECOVERY_UUID} rootfstype=${RECOVERY_FS} rw
-    initrd /boot/initramfs-${KERNEL_NAME}.img
+    linux /boot/${VMLINUZ_RECOVERY} root=UUID=${RECOVERY_UUID} rootfstype=${RECOVERY_FS} rw
+    initrd /boot/${INITRAMFS_RECOVERY}
 }
 GRUB_CUSTOM_EOF
     
@@ -1224,6 +1226,39 @@ CHROOT_EOF
 		echo "Executing configuration in chroot..."
 		echo "XXX"
 
+		if [[ "${ENABLE_RECOVERY}" == "yes" ]] && [[ -n "${RECOVERY_PART}" ]]; then
+			log "Mounting recovery partition to detect vmlinuz and initramfs..."
+			mkdir -p /mnt/recovery_partition
+			if mount "${RECOVERY_PART}" /mnt/recovery_partition 2>/dev/null; then
+				local found_vmlinuz found_initramfs
+				found_vmlinuz=$(find /mnt/recovery_partition/boot -maxdepth 1 -name "vmlinuz-*" -printf "%f\n" 2>/dev/null | head -n1)
+				found_initramfs=$(find /mnt/recovery_partition/boot -maxdepth 1 -name "initramfs-*.img" -printf "%f\n" 2>/dev/null | head -n1)
+
+				if [[ -n "${found_vmlinuz}" ]]; then
+					VMLINUZ_RECOVERY_MODE_PARTITION="${found_vmlinuz}"
+					log "Found vmlinuz in recovery partition: ${VMLINUZ_RECOVERY_MODE_PARTITION}"
+				else
+					VMLINUZ_RECOVERY_MODE_PARTITION="vmlinuz-${KERNEL_NAME}"
+					log "No vmlinuz found in recovery partition, using fallback: ${VMLINUZ_RECOVERY_MODE_PARTITION}"
+				fi
+
+				if [[ -n "${found_initramfs}" ]]; then
+					INITRAMFS_RECOVERY_MODE_PARTITION="${found_initramfs}"
+					log "Found initramfs in recovery partition: ${INITRAMFS_RECOVERY_MODE_PARTITION}"
+				else
+					INITRAMFS_RECOVERY_MODE_PARTITION="initramfs-${KERNEL_NAME}.img"
+					log "No initramfs found in recovery partition, using fallback: ${INITRAMFS_RECOVERY_MODE_PARTITION}"
+				fi
+
+				umount /mnt/recovery_partition 2>/dev/null || true
+			else
+				VMLINUZ_RECOVERY_MODE_PARTITION="vmlinuz-${KERNEL_NAME}"
+				INITRAMFS_RECOVERY_MODE_PARTITION="initramfs-${KERNEL_NAME}.img"
+				log "Could not mount recovery partition, using fallback values"
+			fi
+			rm -rf /mnt/recovery_partition 2>/dev/null || true
+		fi
+
 		log "Executing configuration script..."
 		if ! env \
 			ROOT_PASSWORD="${ROOT_PASSWORD}" \
@@ -1242,6 +1277,8 @@ CHROOT_EOF
 			SETUP_ZRAM="${ENABLE_ZRAM}" \
 			SETUP_ROOT_FS="${ROOT_FS}" \
 			OTHER_KERNELS="${OTHER_KERNELS}" \
+			SETUP_VMLINUZ_RECOVERY="${VMLINUZ_RECOVERY_MODE_PARTITION}" \
+			SETUP_INITRAMFS_RECOVERY="${INITRAMFS_RECOVERY_MODE_PARTITION}" \
 			arch-chroot /mnt /setup.sh 2>&1 | tee -a "${LOG_FILE}"; then
 			error "Failed to configure system"
 		fi
