@@ -984,7 +984,7 @@ BOOT_PART="${SETUP_BOOT_PART}"
 RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
-NVIDIA_SUPPORT="{SETUP_NVIDIA}"
+NVIDIA_SUPPORT="${SETUP_NVIDIA}"
 ROOT_FS="${SETUP_ROOT_FS}"
 OTHER_KERNELS="${OTHER_KERNELS}"
 VMLINUZ_RECOVERY="${SETUP_VMLINUZ_RECOVERY}"
@@ -1470,10 +1470,6 @@ main() {
 	echo "RengeOS Reborn On Recovery Mode" >>"${LOG_FILE}"
 	echo "========================================" >>"${LOG_FILE}"
 	log "Installation started at $(date)"
-
-	if [[ ${EUID} -ne 0 ]]; then
-		error "This script must be run as root"
-	fi
 
 	check_dependencies
 

@@ -2169,10 +2169,6 @@ main() {
 	echo "========================================" >>"$LOG_FILE"
 	log "Installation started at $(date)"
 
-	if [ "$EUID" -ne 0 ]; then
-		error "This script must be run as root"
-	fi
-
 	check_dependencies
 	detect_boot_mode
 
