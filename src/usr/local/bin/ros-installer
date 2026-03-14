@@ -33,10 +33,7 @@ ROOT_PASSWORD=""
 USER_PASSWORD=""
 ENABLE_ZRAM=""
 MANUAL_PARTITIONING=""
-
-# Experiment
 NVIDIA_SUPPORT=""
-GRUB_BOOTLOADER=""
 
 log() {
 	echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -968,10 +965,6 @@ DISK CONFIGURATION:\n\
   Disk: $DISK\n\
   Partitioning: $partitioning_method\n\
   Boot Mode: $BOOT_MODE\n\
-  Filesystems:\n\
-    - Boot: $boot_fs_display (optimized for $BOOT_MODE)\n\
-    - Root: $root_fs_display\n\
-    - Recovery: $recovery_status (XFS, GRUB-compatible)\n\
   Zram: $zram_status\n\
   Nvidia Support: $nvidia_status\n\
 $partition_layout\n\n\
@@ -2126,6 +2119,13 @@ show_completion_message() {
 		zram_info="\nZram: Disabled"
 	fi
 
+	local nvidia_info=""
+	if [ "$NVIDIA_SUPPORT" = "yes" ]; then
+		nvidia_info="Enabled"
+	else
+		nvidia_info="Disabled"
+	fi
+
 	local partitioning_method="Automatic"
 	if [ "$MANUAL_PARTITIONING" = "yes" ]; then
 		partitioning_method="Manual (cfdisk)"
@@ -2147,6 +2147,7 @@ Installation Summary:\n\
   - Hostname: $HOSTNAME\n\
   - User: $USERNAME\n\
   - Kernel: $KERNEL_NAME\n\
+  - Nvidia: $nvidia_info\n\
   - $fs_info$recovery_info$zram_info\n\n\
 What's next:\n\
   1. Remove installation media\n\

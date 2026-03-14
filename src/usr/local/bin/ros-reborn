@@ -25,14 +25,15 @@ LOCALE=""
 KERNEL_NAME=""
 BOOT_MODE=""
 BOOT_FS=""
-ENABLE_RECOVERY="no"
-ROOT_FS="bcachefs"
+ENABLE_RECOVERY=""
+ROOT_FS=""
 OTHER_KERNELS=""
 VMLINUZ_RECOVERY_MODE_PARTITION=""
 INITRAMFS_RECOVERY_MODE_PARTITION=""
 ROOT_PASSWORD=""
 USER_PASSWORD=""
-ENABLE_ZRAM="no"
+ENABLE_ZRAM=""
+NVIDIA_SUPPORT=""
 
 # Logging functions
 log() {
@@ -599,6 +600,20 @@ Enable Zram now?" 16 60; then
 	fi
 }
 
+configure_nvidia() {
+	log "Prompting user for nvidia graphics cards support configuration..."
+	if dialog --title "Nvidia Configuration" --defaultno --yesno "\
+Do you want to enable Nvidia Graphics Card support?\n\n\
+Select Yes if your computer has an Nvidia Graphics Card.\n\n\
+Select No if your computer does not use an Nvidia Graphics Card." 16 60; then
+		NVIDIA_SUPPORT="yes"
+		log "User chose to enable nvidia support"
+	else
+		NVIDIA_SUPPORT="no"
+		log "User chose to skip nvidia configuration"
+	fi
+}
+
 show_configuration_summary() {
 	local boot_fs_display
 	if [[ "${BOOT_MODE}" == "UEFI" ]]; then
@@ -615,6 +630,11 @@ show_configuration_summary() {
 	local zram_status="Disabled"
 	if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
 		zram_status="Enabled (RAM/2, LZ4)"
+	fi
+
+	local nvidia_status="Disabled"
+	if [ "$NVIDIA_SUPPORT" = "yes" ]; then
+		nvidia_status="Enabled"
 	fi
 
 	local other_kernels_info=""
@@ -636,6 +656,7 @@ SYSTEM CONFIGURATION:\n\
   Timezone: ${TIMEZONE}\n\
   Locale:   ${LOCALE}\n\
   Kernel:   ${KERNEL_NAME} (auto-detected)${other_kernels_info}\n\
+  Nvidia Support: $nvidia_status\n\
   Zram:     ${zram_status}\n\n\
 WARNING: Selected partitions will be FORMATTED!\n\
          ALL DATA will be LOST!\n\n\
@@ -961,6 +982,7 @@ BOOT_PART="${SETUP_BOOT_PART}"
 RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
+NVIDIA_SUPPORT="{SETUP_NVIDIA}"
 ROOT_FS="${SETUP_ROOT_FS}"
 OTHER_KERNELS="${OTHER_KERNELS}"
 VMLINUZ_RECOVERY="${SETUP_VMLINUZ_RECOVERY}"
@@ -1015,18 +1037,39 @@ echo "${USERNAME}:${USER_PASS}" | chpasswd
 log "Configuring sudo access for wheel group..."
 sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-log "Setting up mkinitcpio..."
-if [[ -f /etc/mkinitcpio.conf.d/archiso.conf ]]; then
-    mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
-    rm -rf /etc/mkinitcpio.conf.d/
+if [ "${NVIDIA_SUPPORT}" == "yes" ]; then
+    log "Setting up mkinitcpio (Nvidia)..."
+    if [[ -f /etc/mkinitcpio.conf.d/archiso-nvidia.conf ]]; then
+        mv /etc/mkinitcpio.conf.d/archiso-nvidia.conf /etc/mkinitcpio.conf
+        rm -rf /etc/mkinitcpio.conf.d/
+    fi
+else
+    log "Setting up mkinitcpio (Non-nvidia)..."
+    if [[ -f /etc/mkinitcpio.conf.d/archiso.conf ]]; then
+        mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
+        rm -rf /etc/mkinitcpio.conf.d/
+    fi
 fi
 
 log "Configuring mkinitcpio hooks for ${ROOT_FS}..."
-if [[ "${ROOT_FS}" == "bcachefs" ]]; then
+if [ "${NVIDIA_SUPPORT}" == "yes" ]; then
+
+if [ "${ROOT_FS}" == "bcachefs" ]; then
+    sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+else
+    sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+fi
+
+else
+
+if [ "${ROOT_FS}" == "bcachefs" ]; then
     sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress)/' /etc/mkinitcpio.conf
 else
     sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress)/' /etc/mkinitcpio.conf
 fi
+
+fi
+
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
 
 # First, remove any kernels that were not selected
@@ -1112,7 +1155,7 @@ ZRAM_EOF
 fi
 
 log "Removing ROS-Helper-Scripts package if present in main system..."
-pacman -R --noconfirm ros-helper-scripts
+pacman -R --noconfirm ros-helper-scripts || true
 
 if [[ "${ROOT_FS}" == "bcachefs" ]]; then
     log "Creating Bcachefs snapshots subvolume..."
@@ -1172,10 +1215,22 @@ fi
 
 ROOT_UUID=$(blkid -s UUID -o value "${ROOT_PART}")
 
-if [[ "${DISK}" == *"nvme"* ]]; then
+if [ "${NVIDIA_SUPPORT}" == "yes" ]; then
+
+if [[ "$DISK" == *"nvme"* ]]; then
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FS} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise udev.log_level=3 nvidia nvidia-drm.modeset=1 nouveau.modeset=0 module_blacklist=nouveau radeon.modeset=1 i915.modeset=1"
+else
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FS} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise udev.log_level=3 nvidia nvidia-drm.modeset=1 nouveau.modeset=0 module_blacklist=nouveau radeon.modeset=1 i915.modeset=1"
+fi
+
+else
+
+if [[ "$DISK" == *"nvme"* ]]; then
     CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FS} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise"
 else
     CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FS} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise"
+fi
+
 fi
 
 sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
@@ -1275,6 +1330,7 @@ CHROOT_EOF
 			SETUP_RECOVERY_PART="${RECOVERY_PART}" \
 			SETUP_ENABLE_RECOVERY="${ENABLE_RECOVERY}" \
 			SETUP_ZRAM="${ENABLE_ZRAM}" \
+			SETUP_NVIDIA="${NVIDIA_SUPPORT}" \
 			SETUP_ROOT_FS="${ROOT_FS}" \
 			OTHER_KERNELS="${OTHER_KERNELS}" \
 			SETUP_VMLINUZ_RECOVERY="${VMLINUZ_RECOVERY_MODE_PARTITION}" \
@@ -1368,6 +1424,15 @@ show_completion_message() {
 	local zram_info=""
 	if [[ "${ENABLE_ZRAM}" == "yes" ]]; then
 		zram_info="\n  - Zram: Enabled (RAM/2, LZ4 compression)"
+	else
+		zram_info="\n - Zram: Disabled"
+	fi
+
+	local nvidia_info=""
+	if [[ "${NVIDIA_SUPPORT}" == "yes" ]]; then
+		nvidia_info="Enabled"
+	else
+		nvidia_info="Disabled"
 	fi
 
 	local other_kernels_info=""
@@ -1383,7 +1448,8 @@ Installation Summary:\n\
   - Root: ${ROOT_PART} (${ROOT_FS})${recovery_info}\n\
   - Hostname: ${HOSTNAME}\n\
   - User: ${USERNAME}\n\
-  - Kernel: ${KERNEL_NAME} (installed)${other_kernels_info}${zram_info}\n\n\
+  - Kernel: ${KERNEL_NAME} (installed)${other_kernels_info}${zram_info}\n\
+  - Nvidia Support: ${nvidia_info}\n\n\
 What's next:\n\
   1. Reboot your system\n\
   2. Enjoy your new RengeOS!\n\n\
@@ -1416,6 +1482,7 @@ main() {
 	configure_user_settings
 	detect_kernel
 	configure_zram
+	configure_nvidia
 	show_configuration_summary
 
 	dialog --title "FINAL WARNING" --defaultno --yesno "\
