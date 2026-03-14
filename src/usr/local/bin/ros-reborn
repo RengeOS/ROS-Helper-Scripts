@@ -635,6 +635,8 @@ show_configuration_summary() {
 	local nvidia_status="Disabled"
 	if [ "$NVIDIA_SUPPORT" = "yes" ]; then
 		nvidia_status="Enabled"
+	else
+		nvidia_status="Disabled"
 	fi
 
 	local other_kernels_info=""
