@@ -1708,7 +1708,7 @@ BOOT_PART="${SETUP_BOOT_PART}"
 RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
-NVIDIA_SUPPORT="{SETUP_NVIDIA}"
+NVIDIA_SUPPORT="${SETUP_NVIDIA}"
 RECOVERY_UUID="${SETUP_RECOVERY_UUID}"
 ROOT_FSTYPE="${SETUP_ROOT_FSTYPE}"
 KERNELS_TO_REMOVE_STR="${SETUP_KERNELS_TO_REMOVE}"
@@ -1783,17 +1783,17 @@ log "Configuring sudo access for wheel group..."
 sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
 if [ "$NVIDIA_SUPPORT" = "yes" ]; then
-
-log "Setting up mkinitcpio (Nvidia)..."
-if [ -f /etc/mkinitcpio.conf.d/archiso-nvidia.conf ]; then
-    mv /etc/mkinitcpio.conf.d/archiso-nvidia.conf /etc/mkinitcpio.conf
-    rm -rf /etc/mkinitcpio.conf.d/
+    log "Setting up mkinitcpio (Nvidia)..."
+    if [ -f /etc/mkinitcpio.conf.d/archiso-nvidia.conf ]; then
+        mv /etc/mkinitcpio.conf.d/archiso-nvidia.conf /etc/mkinitcpio.conf
+        rm -rf /etc/mkinitcpio.conf.d/
+    fi
 else
-log "Setting up mkinitcpio (Non-nvidia)..."
-if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
-    mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
-    rm -rf /etc/mkinitcpio.conf.d/
-
+    log "Setting up mkinitcpio (Non-nvidia)..."
+    if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
+        mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
+        rm -rf /etc/mkinitcpio.conf.d/
+    fi
 fi
 
 log "Configuring mkinitcpio hooks for $ROOT_FSTYPE..."
@@ -1859,7 +1859,7 @@ if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
 fi
 
 log "Removing ROS-Helper-Scripts package if present in main system..."
-pacman -R --noconfirm ros-helper-scripts
+pacman -R --noconfirm ros-helper-scripts || true
 
 if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
     log "Creating Bcachefs snapshots subvolume..."
