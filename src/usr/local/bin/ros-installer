@@ -25,14 +25,18 @@ BOOT_SIZE="1G"
 RECOVERY_SIZE="10G"
 BOOT_MODE=""
 BOOT_FS=""
-ENABLE_RECOVERY="no"
-ROOT_FSTYPE="bcachefs"
+ENABLE_RECOVERY=""
+ROOT_FSTYPE=""
 ALL_KERNELS=()
 KERNELS_TO_REMOVE=()
 ROOT_PASSWORD=""
 USER_PASSWORD=""
-ENABLE_ZRAM="no"
-MANUAL_PARTITIONING="no"
+ENABLE_ZRAM=""
+MANUAL_PARTITIONING=""
+
+# Experiment
+NVIDIA_SUPPORT=""
+GRUB_BOOTLOADER=""
 
 log() {
 	echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -67,7 +71,14 @@ cleanup_on_error() {
 }
 
 check_dependencies() {
-	local deps=("dialog" "gdisk" "fdisk" "sfdisk" "unsquashfs" "arch-chroot" "genfstab" "grub-install" "bcachefs" "mkfs.xfs" "mkfs.vfat" "cfdisk" "lsblk" "blkid")
+	local deps=(
+	"dialog" "gdisk" "fdisk" "sfdisk"
+	"unsquashfs" "arch-chroot"
+	"genfstab" "grub-install" "bcachefs"
+	"mkfs.xfs" "mkfs.vfat" "cfdisk"
+	"lsblk" "blkid"
+	)
+
 	local missing=()
 
 	for cmd in "${deps[@]}"; do
@@ -97,7 +108,7 @@ detect_boot_mode() {
 prompt_manual_partitioning() {
 	log "Prompting user for manual partitioning preference..."
 
-	if dialog --title "Partitioning Method" --yesno "\
+	if dialog --title "Partitioning Method" --defaultno --yesno "\
 Do you want to manually partition the disk?\n\n\
 If you choose YES, you will use cfdisk to create partitions manually.\n\
 If you choose NO, the installer will automatically partition the disk.\n\n\
@@ -499,6 +510,20 @@ Enable Zram now?" 16 60; then
 	else
 		ENABLE_ZRAM="no"
 		log "User chose to skip Zram configuration"
+	fi
+}
+
+configure_nvidia() {
+	log "Prompting user for nvidia graphics cards support configuration..."
+	if dialog --title "Nvidia Configuration" --defaultno --yesno "\
+Do you want to enable Nvidia Graphics Card support?\n\n\
+Select Yes if your computer has an Nvidia Graphics Card.\n\n\
+Select No if your computer does not use an Nvidia Graphics Card." 16 60; then
+		NVIDIA_SUPPORT="yes"
+		log "User chose to enable nvidia support"
+	else
+		NVIDIA_SUPPORT="no"
+		log "User chose to skip nvidia configuration"
 	fi
 }
 
@@ -914,6 +939,11 @@ show_configuration_summary() {
 		zram_status="Enabled (RAM/2, LZ4)"
 	fi
 
+	local nvidia_status="Disabled"
+	if [ "$NVIDIA_SUPPORT" = "yes" ]; then
+		nvidia_status="Enabled"
+	fi
+
 	local partition_layout="  Boot: $BOOT_PART ($boot_fs_display, $BOOT_SIZE)"
 
 	if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
@@ -943,6 +973,7 @@ DISK CONFIGURATION:\n\
     - Root: $root_fs_display\n\
     - Recovery: $recovery_status (XFS, GRUB-compatible)\n\
   Zram: $zram_status\n\
+  Nvidia Support: $nvidia_status\n\
 $partition_layout\n\n\
 SYSTEM CONFIGURATION:\n\
   Hostname: $HOSTNAME\n\
@@ -1470,6 +1501,7 @@ configure_system() {
 	local root_pass="$ROOT_PASSWORD"
 	local user_pass="$USER_PASSWORD"
 	local enable_zram="$ENABLE_ZRAM"
+	local enable_nvidia="$NVIDIA_SUPPORT"
 	local recovery_uuid=""
 
 	if [ "$ENABLE_RECOVERY" = "yes" ] && [ -n "$RECOVERY_PART" ]; then
@@ -1676,6 +1708,7 @@ BOOT_PART="${SETUP_BOOT_PART}"
 RECOVERY_PART="${SETUP_RECOVERY_PART}"
 ENABLE_RECOVERY="${SETUP_ENABLE_RECOVERY}"
 ENABLE_ZRAM="${SETUP_ZRAM}"
+NVIDIA_SUPPORT="{SETUP_NVIDIA}"
 RECOVERY_UUID="${SETUP_RECOVERY_UUID}"
 ROOT_FSTYPE="${SETUP_ROOT_FSTYPE}"
 KERNELS_TO_REMOVE_STR="${SETUP_KERNELS_TO_REMOVE}"
@@ -1749,19 +1782,39 @@ echo "$USERNAME:$USER_PASS" | chpasswd
 log "Configuring sudo access for wheel group..."
 sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-log "Setting up mkinitcpio..."
+if [ "$NVIDIA_SUPPORT" = "yes" ]; then
+
+log "Setting up mkinitcpio (Nvidia)..."
+if [ -f /etc/mkinitcpio.conf.d/archiso-nvidia.conf ]; then
+    mv /etc/mkinitcpio.conf.d/archiso-nvidia.conf /etc/mkinitcpio.conf
+    rm -rf /etc/mkinitcpio.conf.d/
+else
+log "Setting up mkinitcpio (Non-nvidia)..."
 if [ -f /etc/mkinitcpio.conf.d/archiso.conf ]; then
     mv /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.conf
     rm -rf /etc/mkinitcpio.conf.d/
+
 fi
 
 log "Configuring mkinitcpio hooks for $ROOT_FSTYPE..."
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
 
+if [ "$NVIDIA_SUPPORT" = "yes" ]; then
+
+if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
+    sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+else
+    sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+fi
+
+else
+
 if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
     sed -i 's/^MODULES=.*/MODULES=(bcachefs lz4 lz4_compress)/' /etc/mkinitcpio.conf
 else
     sed -i 's/^MODULES=.*/MODULES=(xfs lz4 lz4_compress)/' /etc/mkinitcpio.conf
+fi
+
 fi
 
 log "Creating kernel preset for $KERNEL_NAME..."
@@ -1804,7 +1857,6 @@ if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
     log "ERROR: initramfs not found after generation"
     exit 1
 fi
-
 
 log "Removing ROS-Helper-Scripts package if present in main system..."
 pacman -R --noconfirm ros-helper-scripts
@@ -1881,12 +1933,23 @@ fi
 
 ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 
+if [ "$NVIDIA_SUPPORT" = "yes" ]; then
+
+if [[ "$DISK" == *"nvme"* ]]; then
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise udev.log_level=3 nvidia nvidia-drm.modeset=1 nouveau.modeset=0 module_blacklist=nouveau radeon.modeset=1 i915.modeset=1"
+else
+    CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise udev.log_level=3 nvidia nvidia-drm.modeset=1 nouveau.modeset=0 module_blacklist=nouveau radeon.modeset=1 i915.modeset=1"
+fi
+
+else
+
 if [[ "$DISK" == *"nvme"* ]]; then
     CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog nvme_load=YES loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise"
 else
     CMDLINE_PARAMS="root=UUID=${ROOT_UUID} rootfstype=${ROOT_FSTYPE} rw nowatchdog loglevel=3 zswap.enabled=0 split_lock_detect=off transparent_hugepage=madvise"
 fi
 
+fi
 sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT='${CMDLINE_PARAMS}'|" /etc/default/grub
 sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=5/' /etc/default/grub
 
@@ -1951,6 +2014,7 @@ CHROOT_EOF
 			SETUP_RECOVERY_PART="$RECOVERY_PART" \
 			SETUP_ENABLE_RECOVERY="$ENABLE_RECOVERY" \
 			SETUP_ZRAM="$enable_zram" \
+			SETUP_NVIDIA="$enable_nvidia" \
 			SETUP_RECOVERY_UUID="$recovery_uuid" \
 			SETUP_ROOT_FSTYPE="$ROOT_FSTYPE" \
 			SETUP_KERNELS_TO_REMOVE="${KERNELS_TO_REMOVE[*]}" \
@@ -2126,6 +2190,7 @@ main() {
 
 	detect_kernel
 	configure_zram
+	configure_nvidia
 	select_timezone
 	select_locale
 	set_hostname
