@@ -1529,6 +1529,7 @@ log() {
 
 KERNEL_NAME="${RECOVERY_KERNEL}"
 RECOVERY_PART="${RECOVERY_PARTITION}"
+RECOVERY_NVIDIA="${RECOVERY_NVIDIA_SUPPORT}"
 ROOT_PASS="${RECOVERY_ROOT_PASS}"
 KERNELS_TO_REMOVE_STR="${RECOVERY_KERNELS_TO_REMOVE}"
 
@@ -1627,6 +1628,10 @@ if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
     exit 1
 fi
 
+if [ "$RECOVERY_NVIDIA" = "no" ]; then
+pacman -R --noconfirm nvidia-utils nvidia-open-dkms libglvnd xf86-video-nouveau || true
+fi
+
 log "Recovery initramfs generated successfully:"
 ls -lh /boot/initramfs-*.img
 
@@ -1645,6 +1650,7 @@ RECOVERY_CHROOT_EOF
 				RECOVERY_KERNEL="$KERNEL_NAME" \
 				RECOVERY_PARTITION="$RECOVERY_PART" \
 				RECOVERY_ROOT_PASS="$root_pass" \
+				RECOVERY_NVIDIA_SUPPORT="$enable_nvidia" \
 				RECOVERY_KERNELS_TO_REMOVE="${KERNELS_TO_REMOVE[*]}" \
 				chroot /mnt/recovery /setup-recovery.sh 2>&1 | tee -a "$LOG_FILE"; then
 				warning "Recovery chroot configuration had issues, but continuing..."
@@ -1853,6 +1859,10 @@ fi
 
 log "Removing ROS-Helper-Scripts package if present in main system..."
 pacman -R --noconfirm ros-helper-scripts || true
+
+if [ "$NVIDIA_SUPPORT" = "no" ]; then
+pacman -R --noconfirm nvidia-utils nvidia-open-dkms libglvnd xf86-video-nouveau || true
+fi
 
 if [ "$ROOT_FSTYPE" = "bcachefs" ]; then
     log "Creating Bcachefs snapshots subvolume..."

@@ -375,7 +375,6 @@ WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1
 
 	ROOT_PART=$(dialog --title "Select Root Partition" --menu "\
 Select the Root Partition:\n\n\
-This partition will be formatted as ${ROOT_FS}.\n\n\
 Found ${count} partition(s).\n\
 Use arrow keys to select, Enter to confirm.\n\n\
 WARNING: Selected partition will be FORMATTED!" 20 70 10 "${partitions[@]}" 3>&1 1>&2 2>&3) || exit 0
@@ -1158,6 +1157,10 @@ fi
 
 log "Removing ROS-Helper-Scripts package if present in main system..."
 pacman -R --noconfirm ros-helper-scripts || true
+
+if [ "${NVIDIA_SUPPORT}" == "no" ]; then
+pacman -R --noconfirm nvidia-utils nvidia-open-dkms libglvnd xf86-video-nouveau || true
+fi
 
 if [[ "${ROOT_FS}" == "bcachefs" ]]; then
     log "Creating Bcachefs snapshots subvolume..."
