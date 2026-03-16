@@ -1628,9 +1628,7 @@ if [ ! -f "/boot/initramfs-$KERNEL_NAME.img" ]; then
     exit 1
 fi
 
-if [ "$RECOVERY_NVIDIA" = "no" ]; then
 pacman -R --noconfirm nvidia-utils nvidia-open-dkms libglvnd xf86-video-nouveau || true
-fi
 
 log "Recovery initramfs generated successfully:"
 ls -lh /boot/initramfs-*.img
