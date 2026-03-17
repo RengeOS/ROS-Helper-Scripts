@@ -1052,6 +1052,10 @@ else
     fi
 fi
 
+# Now clean up any leftover preset files
+log "Cleaning up duplicate kernel presets..."
+rm -f /etc/mkinitcpio.d/*.preset 2>/dev/null || true
+
 log "Configuring mkinitcpio hooks for ${ROOT_FS}..."
 if [ "${NVIDIA_SUPPORT}" == "yes" ]; then
 
@@ -1083,10 +1087,6 @@ if [[ -n "${OTHER_KERNELS}" ]]; then
         }
     done
 fi
-
-# Now clean up any leftover preset files
-log "Cleaning up duplicate kernel presets..."
-rm -f /etc/mkinitcpio.d/*.preset 2>/dev/null || true
 
 log "Creating kernel preset for ${KERNEL_NAME}..."
 
